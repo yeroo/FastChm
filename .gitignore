@@ -9,7 +9,7 @@ fastchm.exe
 test/decompiled/
 test/bigdec/
 test/big/
-test/hhview.png
+test/*.png
 
 # downloaded format references (GPL/LGPL — not redistributed in this MIT repo;
 # see refs/NOTES.md for the condensed format documentation)

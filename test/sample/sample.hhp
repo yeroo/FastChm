@@ -4,12 +4,25 @@ Compiled file=sample.chm
 Contents file=toc.hhc
 Index file=index.hhk
 Default topic=index.htm
+Default Window=main
 Title=FastChm Sample Help
 Language=0x409 English (United States)
+Binary TOC=Yes
+Binary Index=Yes
+Full-text search=Yes
+
+[WINDOWS]
+main="FastChm Sample Help","toc.hhc","index.hhk","index.htm","index.htm",,,,,0x63520,220,0x10384e,[10,10,800,600],,,,,,,0
 
 [FILES]
 index.htm
-page2.htm
-style.css
+
+[ALIAS]
+IDH_WELCOME=index.htm
+IDH_PAGE2=page2.htm
+
+[MAP]
+#define IDH_WELCOME 1001
+#define IDH_PAGE2 1002
 
 [INFOTYPES]

@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
         }
     }
     if (hhp.empty()) {
-        printf("FastChm 0.1 — zero-dependency CHM compiler\n"
+        printf("FastChm 0.2 — zero-dependency CHM compiler\n"
                "usage: fastchm <project.hhp> [-o output.chm]\n");
         return 2;
     }

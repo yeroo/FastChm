@@ -3,15 +3,20 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <fstream>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 #include "bytebuf.h"
 #include "chmwriter.h"
+#include "fifti.h"
 #include "lzx.h"
+#include "objinst_data.h"
+#include "sitemap.h"
 
 namespace fastchm {
 namespace {
@@ -43,17 +48,91 @@ bool readFile(const std::string& path, std::vector<uint8_t>& out) {
     return n == 0 || !!f.read(reinterpret_cast<char*>(out.data()), n);
 }
 
+bool isHtmlName(const std::string& name) {
+    return lowerCopy(name).find(".ht") != std::string::npos &&
+           lowerCopy(name).find(".hhc") == std::string::npos &&
+           lowerCopy(name).find(".hhk") == std::string::npos;
+}
+
 // ---------------- HHP project ----------------
 
 struct Project {
-    std::string dir;  // directory of the .hhp, with trailing separator
+    std::string dir;  // directory of the .hhp, with trailing separator (or empty)
     std::unordered_map<std::string, std::string> options;  // lower-cased keys
     std::vector<std::string> files;                        // [FILES], deduped, ordered
+    std::vector<std::string> windowLines;                  // raw [WINDOWS] lines
+    std::vector<std::pair<std::string, std::string>> aliases;  // name -> file
+    std::vector<std::pair<std::string, uint32_t>> mapDefs;     // name -> context id
+
     std::string opt(const std::string& key) const {
         auto it = options.find(key);
         return it == options.end() ? "" : it->second;
     }
+    bool optYes(const std::string& key) const {
+        const std::string v = lowerCopy(opt(key));
+        return v == "yes" || v == "true" || v == "1";
+    }
 };
+
+void parseMapLine(const std::string& line, Project& p);
+
+void parseAliasLine(const std::string& line, Project& p) {
+    if (line[0] == '#') {  // #include alias.inc
+        std::string inc = trim(line.substr(line.find_first_of(" \t") + 1));
+        if (!inc.empty() && inc.front() == '"') inc = inc.substr(1, inc.size() - 2);
+        std::vector<uint8_t> raw;
+        if (readFile(p.dir + slashes(inc), raw)) {
+            std::string text(raw.begin(), raw.end());
+            size_t pos = 0;
+            while (pos < text.size()) {
+                size_t nl = text.find('\n', pos);
+                if (nl == std::string::npos) nl = text.size();
+                const std::string l = trim(text.substr(pos, nl - pos));
+                pos = nl + 1;
+                if (!l.empty() && l[0] != ';') parseAliasLine(l, p);
+            }
+        } else {
+            fprintf(stderr, "fastchm: warning: cannot read alias include: %s\n", inc.c_str());
+        }
+        return;
+    }
+    const size_t eq = line.find('=');
+    if (eq == std::string::npos) return;
+    std::string file = trim(line.substr(eq + 1));
+    const size_t semi = file.find(';');  // strip trailing comment
+    if (semi != std::string::npos) file = trim(file.substr(0, semi));
+    p.aliases.emplace_back(trim(line.substr(0, eq)), slashes(file));
+}
+
+void parseMapLine(const std::string& line, Project& p) {
+    if (line.compare(0, 7, "#define") == 0) {
+        const std::string rest = trim(line.substr(7));
+        const size_t sp = rest.find_first_of(" \t");
+        if (sp == std::string::npos) return;
+        const std::string name = trim(rest.substr(0, sp));
+        const uint32_t id =
+            static_cast<uint32_t>(strtoul(trim(rest.substr(sp)).c_str(), nullptr, 0));
+        p.mapDefs.emplace_back(name, id);
+    } else if (line.compare(0, 8, "#include") == 0) {
+        std::string inc = trim(line.substr(8));
+        if (!inc.empty() && (inc.front() == '"' || inc.front() == '<'))
+            inc = inc.substr(1, inc.size() - 2);
+        std::vector<uint8_t> raw;
+        if (readFile(p.dir + slashes(inc), raw)) {
+            std::string text(raw.begin(), raw.end());
+            size_t pos = 0;
+            while (pos < text.size()) {
+                size_t nl = text.find('\n', pos);
+                if (nl == std::string::npos) nl = text.size();
+                const std::string l = trim(text.substr(pos, nl - pos));
+                pos = nl + 1;
+                if (!l.empty()) parseMapLine(l, p);
+            }
+        } else {
+            fprintf(stderr, "fastchm: warning: cannot read map include: %s\n", inc.c_str());
+        }
+    }
+}
 
 bool parseHhp(const std::string& path, Project& p, std::string& err) {
     std::vector<uint8_t> raw;
@@ -87,20 +166,130 @@ bool parseHhp(const std::string& path, Project& p, std::string& err) {
         } else if (section == "files") {
             const std::string f = slashes(line);
             if (seen.insert(lowerCopy(f)).second) p.files.push_back(f);
+        } else if (section == "windows") {
+            p.windowLines.push_back(line);
+        } else if (section == "alias") {
+            parseAliasLine(line, p);
+        } else if (section == "map") {
+            parseMapLine(line, p);
         }
-        // [WINDOWS], [ALIAS], [MAP], [MERGE FILES], full-text search options:
-        // not yet supported; ignored.
+        // [MERGE FILES], [INFOTYPES], [TEXT POPUPS], [SUBSETS]: not supported.
     }
     return true;
 }
 
 uint32_t parseLcid(const std::string& language) {
-    // e.g. "0x409 English (United States)"
     unsigned long v = strtoul(language.c_str(), nullptr, 0);
     return v ? static_cast<uint32_t>(v) : 0x409;
 }
 
-// ---------------- HTML <title> extraction ----------------
+// ---------------- [WINDOWS] definitions ----------------
+
+// HHWIN_PARAM_* validity bits for the flags field at offset 0xC
+enum : uint32_t {
+    WP_PROPERTIES = 0x0002,  // navigation pane style
+    WP_STYLES = 0x0004,
+    WP_EXSTYLES = 0x0008,
+    WP_RECT = 0x0010,
+    WP_NAV_WIDTH = 0x0020,
+    WP_SHOWSTATE = 0x0040,
+    WP_TB_FLAGS = 0x0100,
+    WP_EXPANSION = 0x0200,
+    WP_TABPOS = 0x0400,
+    WP_CUR_TAB = 0x2000,
+};
+
+struct Window {
+    std::string type, caption, toc, index, defaultFile, home;
+    std::string jump1File, jump1Text, jump2File, jump2Text;
+    uint32_t navStyle = 0, navWidth = 0, buttons = 0;
+    int32_t rect[4] = {0, 0, 0, 0};
+    uint32_t styles = 0, exStyles = 0, showState = 0;
+    uint32_t navClosed = 0, navDefault = 0, navPos = 0, notifyId = 0;
+    uint32_t validFlags = 0;
+};
+
+// Splits one "name=arg,arg,..." window definition; quoted strings, hex numbers and
+// a [l,t,r,b] rectangle, all positional (HH Workshop format).
+Window parseWindowLine(const std::string& rawLine) {
+    std::string line = rawLine;
+    const size_t eq = line.find('=');
+    if (eq != std::string::npos) line[eq] = ',';
+
+    std::vector<std::string> tok;
+    size_t i = 0;
+    while (i <= line.size()) {
+        std::string cur;
+        if (i < line.size() && line[i] == '"') {
+            const size_t close = line.find('"', i + 1);
+            cur = line.substr(i + 1, close == std::string::npos ? std::string::npos
+                                                                : close - i - 1);
+            i = close == std::string::npos ? line.size() : close + 1;
+            i = line.find(',', i);
+            i = i == std::string::npos ? line.size() + 1 : i + 1;
+        } else {
+            size_t comma = line.find(',', i);
+            if (comma == std::string::npos) comma = line.size();
+            cur = trim(line.substr(i, comma - i));
+            i = comma + 1;
+        }
+        tok.push_back(cur);
+    }
+
+    Window w;
+    auto str = [&](size_t idx) { return idx < tok.size() ? tok[idx] : std::string(); };
+    auto num = [&](size_t idx, uint32_t bit) -> uint32_t {
+        if (idx >= tok.size() || tok[idx].empty()) return 0;
+        if (bit) w.validFlags |= bit;
+        return static_cast<uint32_t>(strtoul(tok[idx].c_str(), nullptr, 0));
+    };
+
+    w.type = str(0);
+    w.caption = str(1);
+    w.toc = slashes(str(2));
+    w.index = slashes(str(3));
+    w.defaultFile = slashes(str(4));
+    w.home = slashes(str(5));
+    w.jump1File = slashes(str(6));
+    w.jump1Text = str(7);
+    w.jump2File = slashes(str(8));
+    w.jump2Text = str(9);
+    w.navStyle = num(10, WP_PROPERTIES);
+    w.navWidth = num(11, WP_NAV_WIDTH);
+    w.buttons = num(12, WP_TB_FLAGS);
+
+    // [l,t,r,b] spans four comma-separated tokens
+    size_t idx = 13;
+    if (idx < tok.size() && !tok[idx].empty() && tok[idx][0] == '[') {
+        bool any = false;
+        for (int k = 0; k < 4 && idx < tok.size(); k++, idx++) {
+            std::string v = tok[idx];
+            v.erase(std::remove(v.begin(), v.end(), '['), v.end());
+            const size_t br = v.find(']');
+            const bool last = br != std::string::npos;
+            if (last) v = v.substr(0, br);
+            if (!trim(v).empty()) any = true;
+            w.rect[k] = static_cast<int32_t>(strtol(v.c_str(), nullptr, 0));
+            if (last) {
+                idx++;
+                break;
+            }
+        }
+        if (any) w.validFlags |= WP_RECT;
+    } else if (idx < tok.size()) {
+        idx++;  // empty rect slot
+    }
+    w.styles = num(idx++, WP_STYLES);
+    w.exStyles = num(idx++, WP_EXSTYLES);
+    w.showState = num(idx++, WP_SHOWSTATE);
+    w.navClosed = num(idx++, WP_EXPANSION);
+    w.navDefault = num(idx++, WP_CUR_TAB);
+    w.navPos = num(idx++, WP_TABPOS);
+    w.notifyId = num(idx++, 0);
+    return w;
+}
+
+// ---------------- HTML scanning ----------------
 
 std::string extractTitle(const std::vector<uint8_t>& html) {
     const std::string text(html.begin(), html.end());
@@ -112,7 +301,6 @@ std::string extractTitle(const std::vector<uint8_t>& html) {
     const size_t end = lower.find("</title", ++t);
     if (end == std::string::npos) return "";
     std::string title = text.substr(t, end - t);
-    // collapse whitespace runs to single spaces
     std::string outs;
     bool ws = false;
     for (char c : title) {
@@ -127,6 +315,91 @@ std::string extractTitle(const std::vector<uint8_t>& html) {
     return outs;
 }
 
+bool isWordChar(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_';
+}
+
+// Collects href=/src= attribute values.
+void extractRefs(const std::vector<uint8_t>& html, std::vector<std::string>& out) {
+    const std::string text(html.begin(), html.end());
+    const std::string lower = lowerCopy(text);
+    for (const char* key : {"href", "src"}) {
+        const size_t klen = strlen(key);
+        size_t pos = 0;
+        while ((pos = lower.find(key, pos)) != std::string::npos) {
+            const size_t at = pos;
+            pos += klen;
+            if (at > 0 && isWordChar(lower[at - 1])) continue;  // e.g. data-src
+            size_t i = pos;
+            while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) i++;
+            if (i >= text.size() || text[i] != '=') continue;
+            i++;
+            while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) i++;
+            std::string value;
+            if (i < text.size() && (text[i] == '"' || text[i] == '\'')) {
+                const char q = text[i++];
+                while (i < text.size() && text[i] != q) value.push_back(text[i++]);
+            } else {
+                while (i < text.size() && text[i] != '>' &&
+                       !std::isspace(static_cast<unsigned char>(text[i])))
+                    value.push_back(text[i++]);
+            }
+            if (!value.empty()) out.push_back(value);
+        }
+    }
+}
+
+std::string percentDecode(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() && std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            out.push_back(static_cast<char>(strtol(s.substr(i + 1, 2).c_str(), nullptr, 16)));
+            i += 2;
+        } else {
+            out.push_back(s[i]);
+        }
+    }
+    return out;
+}
+
+// Resolves a link found in `baseDir` (project-relative dir of the referring file,
+// "" = project root) to a project-relative path; "" if external/unusable.
+std::string resolveRef(const std::string& baseDir, std::string link) {
+    link = trim(link);
+    if (link.empty() || link[0] == '#') return "";
+    const size_t colon = link.find(':');
+    if (colon != std::string::npos && link.find('/') > colon) return "";  // scheme/drive
+    link = link.substr(0, std::min(link.find('#'), link.find('?')));
+    link = slashes(percentDecode(link));
+    if (link.empty()) return "";
+
+    std::string full = link[0] == '/' ? link.substr(1) : baseDir + link;
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (i <= full.size()) {
+        size_t sl = full.find('/', i);
+        if (sl == std::string::npos) sl = full.size();
+        const std::string seg = full.substr(i, sl - i);
+        i = sl + 1;
+        if (seg.empty() || seg == ".") continue;
+        if (seg == "..") {
+            if (parts.empty()) return "";  // escapes the project root
+            parts.pop_back();
+        } else {
+            parts.push_back(seg);
+        }
+    }
+    std::string out;
+    for (size_t k = 0; k < parts.size(); k++) out += (k ? "/" : "") + parts[k];
+    return out;
+}
+
+std::string dirOf(const std::string& rel) {
+    const size_t sl = rel.find_last_of('/');
+    return sl == std::string::npos ? "" : rel.substr(0, sl + 1);
+}
+
 // ---------------- #STRINGS / #URLSTR+#URLTBL / #TOPICS ----------------
 
 struct StringsTable {
@@ -134,10 +407,10 @@ struct StringsTable {
     std::unordered_map<std::string, uint32_t> map;
     uint32_t add(const std::string& s) {
         if (buf.size() == 0) buf.u8(0);
+        if (s.empty()) return 0;  // offset 0 is the leading NUL
         auto it = map.find(s);
         if (it != map.end()) return it->second;
         size_t pos = buf.size();
-        // entries must not cross 0x1000 block boundaries
         const size_t nextBlock = (pos & ~static_cast<size_t>(0xFFF)) + 0x1000;
         if (pos + s.size() + 1 > nextBlock && s.size() + 1 <= 0x1000) {
             buf.zeros(nextBlock - pos);
@@ -156,10 +429,10 @@ struct UrlTables {
     uint32_t addUrlStr(const std::string& url) {
         auto it = strmap.find(url);
         if (it != strmap.end()) return it->second;
-        const size_t entryLen = 9 + url.size();  // 2 DWORDs + string + NUL
+        const size_t entryLen = 9 + url.size();
         const size_t rem = 0x4000 - urlstr.size() % 0x4000;
         if (rem < entryLen) urlstr.zeros(rem);
-        if (urlstr.size() % 0x4000 == 0) urlstr.u8(0);  // block lead byte
+        if (urlstr.size() % 0x4000 == 0) urlstr.u8(0);
         const uint32_t pos = static_cast<uint32_t>(urlstr.size());
         urlstr.u32(0);
         urlstr.u32(0);
@@ -169,7 +442,7 @@ struct UrlTables {
     }
     uint32_t addUrl(const std::string& url, uint32_t topicIndex) {
         const uint32_t us = addUrlStr(url);
-        if ((urltbl.size() & 0xFFF) == 0xFFC) urltbl.u32(0);  // block pad DWORD
+        if ((urltbl.size() & 0xFFF) == 0xFFC) urltbl.u32(0);
         const uint32_t pos = static_cast<uint32_t>(urltbl.size());
         urltbl.u32(0);
         urltbl.u32(topicIndex);
@@ -182,12 +455,14 @@ struct TopicsTable {
     Buf buf;
     StringsTable& strings;
     UrlTables& urls;
+    std::unordered_map<std::string, uint32_t> byUrl;  // lower-cased url -> topic index
     TopicsTable(StringsTable& s, UrlTables& u) : strings(s), urls(u) {}
 
-    // code -1: derive (6 = has title, 2 = none, 0 = anchor URL)
-    void add(const std::string& title, std::string url, int code) {
+    uint32_t count() const { return static_cast<uint32_t>(buf.size() / 16); }
+
+    uint32_t add(const std::string& title, std::string url, int code) {
         if (!url.empty() && url[0] == '/') url.erase(0, 1);
-        const uint32_t topicIndex = static_cast<uint32_t>(buf.size() / 16);
+        const uint32_t topicIndex = count();
         const uint32_t strOff = title.empty() ? 0xFFFFFFFFu : strings.add(title);
         const uint32_t tblOff = urls.addUrl(url, topicIndex);
         uint16_t inContents;
@@ -197,11 +472,19 @@ struct TopicsTable {
             inContents = 0;
         else
             inContents = title.empty() ? 2 : 6;
-        buf.u32(0);  // #TOCIDX offset (no binary TOC)
+        buf.u32(0);  // patched when a binary TOC is generated
         buf.u32(strOff);
         buf.u32(tblOff);
         buf.u16(inContents);
         buf.u16(0);
+        byUrl.emplace(lowerCopy(url), topicIndex);
+        return topicIndex;
+    }
+    // index of the topic for `url`, or -1
+    int find(std::string url) const {
+        if (!url.empty() && url[0] == '/') url.erase(0, 1);
+        auto it = byUrl.find(lowerCopy(url));
+        return it == byUrl.end() ? -1 : static_cast<int>(it->second);
     }
 };
 
@@ -211,37 +494,6 @@ void sysEntryStr(Buf& b, uint16_t code, const std::string& value) {
     b.u16(code);
     b.u16(static_cast<uint16_t>(value.size() + 1));
     b.strz(value);
-}
-
-std::vector<uint8_t> buildSystem(const Project& p, uint32_t lcid, const std::string& hhcName,
-                                 const std::string& hhkName) {
-    Buf b;
-    b.u32(3);  // version (compatibility 1.1+)
-    // 10: time_t timestamp
-    b.u16(10);
-    b.u16(4);
-    b.u32(static_cast<uint32_t>(time(nullptr)));
-    // 9: compiler id
-    sysEntryStr(b, 9, "FastChm 0.1");
-    // 4: 36-byte info struct
-    b.u16(4);
-    b.u16(36);
-    b.u32(lcid);
-    b.u32(0);  // DBCS
-    b.u32(0);  // full-text search
-    b.u32(0);  // KLinks
-    b.u32(0);  // ALinks
-    b.u64(0);  // FILETIME
-    b.u32(0);
-    b.u32(0);
-    const std::string defTopic = slashes(p.opt("default topic"));
-    if (!defTopic.empty()) sysEntryStr(b, 2, defTopic);
-    if (!p.opt("title").empty()) sysEntryStr(b, 3, p.opt("title"));
-    if (!p.opt("default font").empty()) sysEntryStr(b, 16, p.opt("default font"));
-    if (!hhcName.empty()) sysEntryStr(b, 0, hhcName);
-    if (!hhkName.empty()) sysEntryStr(b, 1, hhkName);
-    if (!p.opt("default window").empty()) sysEntryStr(b, 5, p.opt("default window"));
-    return std::move(b.v);
 }
 
 // ---------------- ::DataSpace control files ----------------
@@ -255,7 +507,7 @@ void utf16NameListEntry(Buf& b, const char* name) {
 
 std::vector<uint8_t> buildNameList() {
     Buf b;
-    b.u16(0);  // total length in words, patched below
+    b.u16(0);
     b.u16(2);
     utf16NameListEntry(b, "Uncompressed");
     utf16NameListEntry(b, "MSCompressed");
@@ -267,11 +519,11 @@ std::vector<uint8_t> buildNameList() {
 
 std::vector<uint8_t> buildControlData() {
     Buf b;
-    b.u32(6);  // DWORDs following 'LZXC'
+    b.u32(6);
     b.raw("LZXC", 4);
     b.u32(2);  // version
-    b.u32(2);  // reset interval, in 0x8000 units
-    b.u32(2);  // window size, in 0x8000 units
+    b.u32(2);  // reset interval (0x8000 units)
+    b.u32(2);  // window size (0x8000 units)
     b.u32(1);  // cache size
     b.u32(0);
     b.u32(0);
@@ -283,8 +535,8 @@ std::vector<uint8_t> buildResetTable(uint64_t uncompressed, uint64_t compressed,
     Buf b;
     b.u32(2);
     b.u32(static_cast<uint32_t>(frameStarts.size()));
-    b.u32(8);     // entry size
-    b.u32(0x28);  // header size
+    b.u32(8);
+    b.u32(0x28);
     b.u64(uncompressed);
     b.u64(compressed);
     b.u64(0x8000);
@@ -293,45 +545,641 @@ std::vector<uint8_t> buildResetTable(uint64_t uncompressed, uint64_t compressed,
 }
 
 std::vector<uint8_t> buildTransformList() {
-    // MS bug replicated: 38 bytes = first 19 chars of the LZX transform GUID string
-    // stored as UTF-16.
     static const char* g = "{7FC28940-9D31-11D0-9B27-00A0C91E9C7C}";
     Buf b;
     for (int i = 0; i < 19; i++) b.u16(static_cast<uint16_t>(g[i]));
     return std::move(b.v);
 }
 
-}  // namespace
+// ---------------- binary TOC (#TOCIDX) ----------------
 
-bool compileProject(const std::string& hhpPath, const std::string& outOverride,
-                    CompileStats& stats, std::string& outPathUsed, std::string& err) {
-    Project p;
-    if (!parseHhp(hhpPath, p, err)) return false;
+// Layout: 4096-byte header {blockSize=4096, offset of 16-byte entries, count of
+// local entries, offset of topic-index DWORD list}; then 20/28-byte page/book
+// structs in level order; then one DWORD (#TOPICS index) per local entry; then
+// 16-byte entries {pageBookOffset, 0x29A+seq, offset into DWORD list, topic index}.
+// All offsets are file-relative (header included).
+class TocIdxBuilder {
+public:
+    TocIdxBuilder(StringsTable& strings, TopicsTable& topics)
+        : strings_(strings), topics_(topics) {}
 
-    const uint32_t lcid = parseLcid(p.opt("language"));
-    std::string hhcName = slashes(p.opt("contents file"));
-    std::string hhkName = slashes(p.opt("index file"));
+    std::vector<uint8_t> build(const SiteMap& toc) {
+        struct Group {
+            const std::vector<SiteMapItem>* items;
+            uint32_t parentPos;
+            bool hasParent;
+        };
+        std::vector<Group> level{{&toc.items, 0, false}}, next;
+        while (!level.empty()) {
+            next.clear();
+            for (const Group& g : level) {
+                for (size_t j = 0; j < g.items->size(); j++) {
+                    const SiteMapItem& item = (*g.items)[j];
+                    const std::string local = slashes(item.param("local"));
+                    const bool hasChildren = !item.children.empty();
+                    const uint32_t props = (hasChildren ? 4u : 0) | (local.empty() ? 0 : 8u);
+                    const uint32_t pos = static_cast<uint32_t>(info_.size());
 
-    // hhc/hhk participate as ordinary archive files; make sure they are in the list
+                    if (j == 0 && g.hasParent)  // patch parent's FirstChildOffset
+                        patch32(info_.v, g.parentPos + 0x14, 4096 + pos);
+
+                    uint32_t topicsOrStrings;
+                    if (!local.empty()) {
+                        int t = topics_.find(local);
+                        if (t < 0) t = static_cast<int>(topics_.add(item.param("name"), local, 2));
+                        patch32(topics_.buf.v, static_cast<uint32_t>(t) * 16, 4096 + pos);
+                        topicsOrStrings = static_cast<uint32_t>(t);
+                        topicDwords_.u32(static_cast<uint32_t>(t));
+                        tocEntries_.emplace_back(4096 + pos, static_cast<uint32_t>(t));
+                        localSeq_++;
+                    } else {
+                        topicsOrStrings = strings_.add(item.param("name"));
+                    }
+
+                    info_.u16(0);
+                    info_.u16(static_cast<uint16_t>(localSeq_));
+                    info_.u32(props);
+                    info_.u32(topicsOrStrings);
+                    info_.u32(g.hasParent ? 4096 + g.parentPos : 0);
+                    const bool lastSibling = j + 1 == g.items->size();
+                    info_.u32(lastSibling ? 0 : 4096 + pos + (hasChildren ? 28 : 20));
+                    if (hasChildren) {
+                        info_.u32(0);  // FirstChildOffset, patched by the child
+                        info_.u32(0);
+                        next.push_back({&item.children, pos, true});
+                    }
+                }
+            }
+            level.swap(next);
+        }
+
+        const uint32_t topicsOffset = 4096 + static_cast<uint32_t>(info_.size());
+        const uint32_t entriesOffset =
+            topicsOffset + static_cast<uint32_t>(topicDwords_.size());
+        Buf out;
+        out.u32(4096);
+        out.u32(entriesOffset);
+        out.u32(localSeq_);
+        out.u32(topicsOffset);
+        out.zeros(4096 - out.size());
+        out.raw(info_.v.data(), info_.size());
+        out.raw(topicDwords_.v.data(), topicDwords_.size());
+        for (size_t i = 0; i < tocEntries_.size(); i++) {
+            out.u32(tocEntries_[i].first);
+            out.u32(0x29A + static_cast<uint32_t>(i));
+            out.u32(topicsOffset + static_cast<uint32_t>(i) * 4);
+            out.u32(tocEntries_[i].second);
+        }
+        return std::move(out.v);
+    }
+
+private:
+    static void patch32(std::vector<uint8_t>& v, size_t off, uint32_t value) {
+        for (int k = 0; k < 4; k++) v[off + k] = static_cast<uint8_t>(value >> (k * 8));
+    }
+    StringsTable& strings_;
+    TopicsTable& topics_;
+    Buf info_, topicDwords_;
+    std::vector<std::pair<uint32_t, uint32_t>> tocEntries_;
+    uint32_t localSeq_ = 0;
+};
+
+// ---------------- binary index ($WWKeywordLinks) ----------------
+
+struct BinIndexFiles {
+    std::vector<uint8_t> btree, data, map, property;
+    uint32_t keywordCount = 0;
+};
+
+class BinIndexBuilder {
+public:
+    explicit BinIndexBuilder(TopicsTable& topics) : topics_(topics) {}
+
+    BinIndexFiles build(const SiteMap& index, uint32_t lcid) {
+        std::vector<const SiteMapItem*> top;
+        for (const SiteMapItem& it : index.items) top.push_back(&it);
+        std::sort(top.begin(), top.end(), [](const SiteMapItem* a, const SiteMapItem* b) {
+            return lowerCopy(a->param("name")) < lowerCopy(b->param("name"));
+        });
+        for (const SiteMapItem* it : top) flatten(*it, it->param("name"), 0, 0);
+
+        // pack entries into 2048-byte listing blocks
+        const size_t BS = 2048;
+        std::vector<std::vector<uint8_t>> listBlocks;     // payloads (no header)
+        std::vector<uint32_t> blockEntryCounts;
+        std::vector<std::vector<uint8_t>> blockFirstIdx;  // first entry in index form
+        std::vector<uint32_t> entriesBefore;              // per block, for the Map file
+        std::vector<uint8_t> cur;
+        uint32_t curCount = 0, doneEntries = 0;
+        auto flush = [&]() {
+            entriesBefore.push_back(doneEntries);
+            doneEntries += curCount;
+            listBlocks.push_back(std::move(cur));
+            blockEntryCounts.push_back(curCount);
+            cur.clear();
+            curCount = 0;
+        };
+        for (const std::vector<uint8_t>& e : entries_) {
+            if (e.size() > BS - 12) continue;  // pathological keyword; skip
+            if (12 + cur.size() + e.size() >= BS) flush();
+            if (cur.empty()) {
+                // index form: drop the trailing "increments by 13" DWORD and replace
+                // the now-trailing constant-1 DWORD with the child block number
+                std::vector<uint8_t> idx(e.begin(), e.end() - 8);
+                const uint32_t child = static_cast<uint32_t>(listBlocks.size());
+                for (int k = 0; k < 4; k++) idx.push_back(static_cast<uint8_t>(child >> (k * 8)));
+                blockFirstIdx.push_back(std::move(idx));
+            }
+            cur.insert(cur.end(), e.begin(), e.end());
+            curCount++;
+        }
+        if (!cur.empty() || listBlocks.empty()) flush();
+        const uint32_t numList = static_cast<uint32_t>(listBlocks.size());
+
+        // index levels
+        std::vector<std::vector<std::vector<uint8_t>>> levels;  // [level][block] payload
+        std::vector<std::vector<uint32_t>> levelCounts, levelFirstChild;
+        std::vector<std::vector<uint8_t>> curIdxForms = std::move(blockFirstIdx);
+        uint32_t levelBase = 0;  // block number of curIdxForms' child level start
+        while (numList > 1) {
+            std::vector<std::vector<uint8_t>> blocks;
+            std::vector<uint32_t> counts, firstChild;
+            std::vector<std::vector<uint8_t>> nextForms;
+            std::vector<uint8_t> blk;
+            uint32_t cnt = 0;
+            const uint32_t thisLevelBase =
+                levelBase + static_cast<uint32_t>(curIdxForms.size());
+            auto flushIdx = [&](uint32_t firstChildBlock) {
+                (void)firstChildBlock;
+                blocks.push_back(std::move(blk));
+                counts.push_back(cnt);
+                blk.clear();
+                cnt = 0;
+            };
+            for (size_t i = 0; i < curIdxForms.size(); i++) {
+                std::vector<uint8_t>& e = curIdxForms[i];
+                // child of this entry = block number levelBase + i
+                const uint32_t child = levelBase + static_cast<uint32_t>(i);
+                for (int k = 0; k < 4; k++)
+                    e[e.size() - 4 + k] = static_cast<uint8_t>(child >> (k * 8));
+                if (8 + blk.size() + e.size() >= BS) flushIdx(0);
+                if (blk.empty()) {
+                    firstChild.push_back(child);
+                    // this block's first entry, child patched to the block we are
+                    // building now (filled by the next level)
+                    std::vector<uint8_t> up(e);
+                    const uint32_t myNr =
+                        thisLevelBase + static_cast<uint32_t>(blocks.size());
+                    for (int k = 0; k < 4; k++)
+                        up[up.size() - 4 + k] = static_cast<uint8_t>(myNr >> (k * 8));
+                    nextForms.push_back(std::move(up));
+                }
+                blk.insert(blk.end(), e.begin(), e.end());
+                cnt++;
+            }
+            if (!blk.empty()) flushIdx(0);
+            levels.push_back(std::move(blocks));
+            levelCounts.push_back(std::move(counts));
+            levelFirstChild.push_back(std::move(firstChild));
+            levelBase = thisLevelBase;
+            curIdxForms = std::move(nextForms);
+            if (curIdxForms.size() <= 1) break;
+        }
+
+        uint32_t totalBlocks = numList;
+        for (const auto& lv : levels) totalBlocks += static_cast<uint32_t>(lv.size());
+
+        // assemble BTree
+        Buf bt;
+        bt.u8(0x3B);
+        bt.u8(0x29);
+        bt.u16(2);  // flags
+        bt.u16(static_cast<uint16_t>(BS));
+        bt.raw("X44\0\0\0\0\0\0\0\0\0\0\0\0\0", 16);
+        bt.u32(0);
+        bt.u32(numList - 1);   // last listing block
+        bt.u32(totalBlocks - 1);  // root block (last listing block when no index)
+        bt.i32(-1);
+        bt.u32(totalBlocks);
+        bt.u16(static_cast<uint16_t>(1 + levels.size()));  // tree depth
+        bt.u32(static_cast<uint32_t>(entries_.size()));
+        bt.u32(1252);
+        bt.u32(lcid);
+        bt.u32(1);  // CHM (not CHW)
+        bt.u32(10031);
+        bt.u32(0);
+        bt.u32(0);
+        bt.u32(0);
+        for (uint32_t i = 0; i < numList; i++) {
+            Buf h;
+            h.u16(static_cast<uint16_t>(BS - 12 - listBlocks[i].size()));
+            h.u16(static_cast<uint16_t>(blockEntryCounts[i]));
+            h.i32(i == 0 ? -1 : static_cast<int32_t>(i - 1));
+            h.i32(i + 1 == numList ? -1 : static_cast<int32_t>(i + 1));
+            bt.raw(h.v.data(), h.size());
+            bt.raw(listBlocks[i].data(), listBlocks[i].size());
+            bt.zeros(BS - 12 - listBlocks[i].size());
+        }
+        for (size_t lv = 0; lv < levels.size(); lv++) {
+            for (size_t b = 0; b < levels[lv].size(); b++) {
+                Buf h;
+                h.u16(static_cast<uint16_t>(BS - 8 - levels[lv][b].size()));
+                h.u16(static_cast<uint16_t>(levelCounts[lv][b]));
+                h.u32(levelFirstChild[lv][b]);
+                bt.raw(h.v.data(), h.size());
+                bt.raw(levels[lv][b].data(), levels[lv][b].size());
+                bt.zeros(BS - 8 - levels[lv][b].size());
+            }
+        }
+
+        BinIndexFiles out;
+        out.keywordCount = static_cast<uint32_t>(entries_.size());
+        out.btree = std::move(bt.v);
+        {
+            Buf d;
+            static const uint8_t dataEntry[13] = {0, 0, 0, 0, 5, 0, 0, 0, 0x80, 0, 0, 0, 0};
+            for (size_t i = 0; i < entries_.size(); i++) d.raw(dataEntry, 13);
+            out.data = std::move(d.v);
+        }
+        {
+            Buf m;
+            m.u16(0);
+            for (uint32_t i = 0; i < numList; i++) {
+                m.u32(entriesBefore[i]);
+                m.u32(i);
+            }
+            out.map = std::move(m.v);
+        }
+        {
+            Buf pr;
+            pr.u32(0);
+            if (!entries_.empty()) {
+                pr.u32(0);
+                pr.u32(0);
+                pr.u32(0xC);
+                pr.u32(1);
+                pr.u32(1);
+                pr.u32(0);
+                pr.u32(0);
+            }
+            out.property = std::move(pr.v);
+        }
+        return out;
+    }
+
+private:
+    // Emits "parent, child" comma-joined keyword paths depth-first (parents are
+    // sorted at the top level; descendants follow their parent, preserving order).
+    void flatten(const SiteMapItem& item, const std::string& path, uint32_t charIndex,
+                 uint16_t depth) {
+        Buf e;
+        for (unsigned char c : path) e.u16(c);  // ANSI -> UTF-16
+        e.u16(0);
+        const std::string seeAlso = item.param("see also");
+        e.u16(seeAlso.empty() ? 0 : 2);
+        e.u16(depth);
+        e.u32(depth == 0 ? 0 : charIndex);
+        e.u32(0);
+        if (!seeAlso.empty()) {
+            e.u32(1);
+            for (unsigned char c : seeAlso) e.u16(c);
+            e.u16(0);
+        } else {
+            // targets: every Local param, titled by the nearest preceding Name param
+            std::vector<std::pair<std::string, std::string>> targets;
+            std::string lastName = item.param("name");
+            bool firstName = true;
+            for (const auto& pr : item.params) {
+                if (pr.first == "name") {
+                    if (!firstName) lastName = pr.second;
+                    firstName = false;
+                } else if (pr.first == "local") {
+                    targets.emplace_back(lastName, slashes(pr.second));
+                }
+            }
+            e.u32(static_cast<uint32_t>(targets.size()));
+            for (const auto& t : targets) {
+                int idx = topics_.find(t.second);
+                if (idx < 0) idx = static_cast<int>(topics_.add(t.first, t.second, -1));
+                e.u32(static_cast<uint32_t>(idx));
+            }
+        }
+        e.u32(1);
+        e.u32(static_cast<uint32_t>(entries_.size()) * 13);
+        entries_.push_back(std::move(e.v));
+
+        for (const SiteMapItem& child : item.children)
+            flatten(child, path + ", " + child.param("name"),
+                    static_cast<uint32_t>(path.size()) + 2, depth + 1);
+    }
+
+    TopicsTable& topics_;
+    std::vector<std::vector<uint8_t>> entries_;
+};
+
+// ---------------- $OBJINST ----------------
+
+// Word-breaker / stemmer instantiation data required by the HH full-text search
+// engine. Fixed content; byte layout as produced by hhc.exe.
+std::vector<uint8_t> buildObjInst() {
+    static const uint8_t gWordBreaker[8] = {0x9A, 0x56, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0xF7};
+    static const uint8_t gStemmer[8] = {0x9A, 0x61, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0xF7};
+    static const uint8_t gSystemSort[8] = {0x9A, 0x56, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0x66};
+    Buf b;
+    b.u32(0x04000000);
+    b.u32(2);     // entries
+    b.u32(24);    // entry 1 offset
+    b.u32(2691);  // entry 1 size
+    b.u32(2715);  // entry 2 offset
+    b.u32(36);    // entry 2 size
+    // entry 1: standard word breaker {4662DAAF-D393-11D0-9A56-00C04FB68BF7}
+    b.guid(0x4662DAAF, 0xD393, 0x11D0, gWordBreaker);
+    b.u32(0x04000000);
+    b.u32(11);  // flags
+    b.u32(1252);
+    b.u32(1033);
+    b.u32(0);
+    b.u32(0);
+    b.u32(0x00145555);
+    b.u32(0x00000A0F);
+    b.u16(0x0100);
+    b.u32(0x00030005);
+    b.zeros(6 * 4);
+    b.u16(0);
+    for (int i = 0; i < 256; i++) b.raw(kObjInstCharTable[i], 10);
+    b.u32(0xE66561C6);
+    b.u32(0x73DF6561);
+    b.u32(0x656F8C73);
+    b.u16(0x6F9C);
+    b.u8(0x65);
+    // stemmer {8FA0D5A8-DEDF-11D0-9A61-00C04FB68BF7}
+    b.guid(0x8FA0D5A8, 0xDEDF, 0x11D0, gStemmer);
+    b.u32(0x04000000);
+    b.u32(1);
+    b.u32(1252);
+    b.u32(1033);
+    b.u32(0);
+    // entry 2: system sort {4662DAB0-D393-11D0-9A56-00C04FB68B66}
+    b.guid(0x4662DAB0, 0xD393, 0x11D0, gSystemSort);
+    b.u32(666);
+    b.u32(1252);
+    b.u32(1033);
+    b.u32(10031);
+    b.u32(0);
+    return std::move(b.v);
+}
+
+// ---------------- compiler ----------------
+
+struct LoadedFile {
+    std::string rel;  // project-relative path with forward slashes
+    std::vector<uint8_t> data;
+};
+
+class Compiler {
+public:
+    Compiler(Project p) : p_(std::move(p)), topics_(strings_, urls_) {}
+
+    bool run(const std::string& outOverride, CompileStats& stats,
+             std::string& outPathUsed, std::string& err);
+
+private:
+    bool gatherFiles(std::string& err);
+    std::vector<uint8_t> buildIvb();
+    std::vector<uint8_t> buildWindows(const std::vector<Window>& windows);
+    std::vector<uint8_t> buildIdxHdr();
+    std::vector<uint8_t> buildSystem(const std::string& defaultWindow, bool binaryToc,
+                                     bool hasKLinks, const std::vector<uint8_t>& idxhdr,
+                                     bool fts);
+
+    Project p_;
+    uint32_t lcid_ = 0x409;
+    std::string hhcName_, hhkName_;
+    std::vector<LoadedFile> loaded_;
+    SiteMap toc_, index_;
+    bool haveToc_ = false, haveIndex_ = false;
+
+    StringsTable strings_;
+    UrlTables urls_;
+    TopicsTable topics_;
+    FtsIndexer fts_;
+};
+
+// BFS over [FILES] plus everything reachable through HTML href/src and sitemap
+// Local params. Explicitly listed files keep their order and must exist; discovered
+// files only warn when missing.
+bool Compiler::gatherFiles(std::string& err) {
+    std::vector<std::pair<std::string, bool>> queue;  // path, explicit
+    std::unordered_set<std::string> enqueued;
+    auto push = [&](const std::string& rel, bool explicitFile) {
+        if (rel.empty()) return;
+        if (enqueued.insert(lowerCopy(rel)).second) queue.emplace_back(rel, explicitFile);
+    };
+    for (const std::string& f : p_.files) push(f, true);
+
+    for (size_t qi = 0; qi < queue.size(); qi++) {
+        const std::string rel = queue[qi].first;
+        const bool explicitFile = queue[qi].second;
+        LoadedFile lf;
+        lf.rel = rel;
+        if (!readFile(p_.dir + rel, lf.data)) {
+            if (explicitFile) {
+                err = "cannot read file: " + p_.dir + rel;
+                return false;
+            }
+            fprintf(stderr, "fastchm: warning: referenced file not found: %s\n",
+                    rel.c_str());
+            continue;
+        }
+        const std::string lrel = lowerCopy(rel);
+        const bool isHhc = lrel == lowerCopy(hhcName_);
+        const bool isHhk = !hhkName_.empty() && lrel == lowerCopy(hhkName_);
+        if (isHhc || isHhk) {
+            SiteMap sm = parseSiteMap(lf.data.data(), lf.data.size());
+            std::vector<std::string> locals;
+            sm.collectLocals(locals);
+            for (const std::string& l : locals) push(resolveRef("", l), false);
+            if (isHhc) {
+                toc_ = std::move(sm);
+                haveToc_ = true;
+            } else {
+                index_ = std::move(sm);
+                haveIndex_ = true;
+            }
+        } else if (isHtmlName(rel)) {
+            std::vector<std::string> refs;
+            extractRefs(lf.data, refs);
+            for (const std::string& r : refs) push(resolveRef(dirOf(rel), r), false);
+        }
+        loaded_.push_back(std::move(lf));
+    }
+    return true;
+}
+
+std::vector<uint8_t> Compiler::buildIvb() {
+    std::map<uint32_t, std::string> ctx;  // id -> file, sorted by id
+    for (const auto& def : p_.mapDefs) {
+        bool found = false;
+        for (const auto& alias : p_.aliases) {
+            if (alias.first == def.first) {
+                ctx[def.second] = alias.second;
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            fprintf(stderr, "fastchm: warning: [MAP] name has no [ALIAS] entry: %s\n",
+                    def.first.c_str());
+    }
+    if (ctx.empty()) return {};
+    Buf b;
+    b.u32(static_cast<uint32_t>(ctx.size() * 8));
+    for (const auto& c : ctx) {
+        b.u32(c.first);
+        b.u32(strings_.add(c.second));
+    }
+    return std::move(b.v);
+}
+
+std::vector<uint8_t> Compiler::buildWindows(const std::vector<Window>& windows) {
+    if (windows.empty()) return {};
+    Buf b;
+    b.u32(static_cast<uint32_t>(windows.size()));
+    b.u32(196);  // entry size (1.1+)
+    for (const Window& w : windows) {
+        b.u32(196);
+        b.u32(0);  // unicode strings: no
+        b.u32(strings_.add(w.type));
+        b.u32(w.validFlags);
+        b.u32(w.navStyle);
+        b.u32(strings_.add(w.caption));
+        b.u32(w.styles);
+        b.u32(w.exStyles);
+        for (int k = 0; k < 4; k++) b.i32(w.rect[k]);
+        b.u32(w.showState);
+        b.zeros(6 * 4);  // hwndHelp/Caller/paInfoTypes/Toolbar/Nav/Html (out params)
+        b.u32(w.navWidth);
+        b.zeros(4 * 4);  // topic pane rect (out)
+        b.u32(strings_.add(w.toc));
+        b.u32(strings_.add(w.index));
+        b.u32(strings_.add(w.defaultFile));
+        b.u32(strings_.add(w.home));
+        b.u32(w.buttons);
+        b.u32(w.navClosed);
+        b.u32(w.navDefault);
+        b.u32(w.navPos);
+        b.u32(w.notifyId);
+        b.zeros(5 * 4);  // tab order
+        b.u32(0);        // history count
+        b.u32(strings_.add(w.jump1Text));
+        b.u32(strings_.add(w.jump2Text));
+        b.u32(strings_.add(w.jump1File));
+        b.u32(strings_.add(w.jump2File));
+        b.zeros(4 * 4);  // rcMinSize
+        b.u32(0);        // cbInfoTypes
+        b.u32(0);        // pszCustomTabs
+    }
+    return std::move(b.v);
+}
+
+// 4096-byte #IDXHDR (also duplicated as #SYSTEM code 13). Emitted with binary index.
+std::vector<uint8_t> Compiler::buildIdxHdr() {
+    Buf b;
+    b.raw("T#SM", 4);
+    b.u32(0);  // timestamp/checksum
+    b.u32(1);
+    b.u32(topics_.count());
+    b.u32(0);
+    b.u32(0xFFFFFFFF);  // ImageList string ("none")
+    b.u32(0);
+    b.u32(0);           // ImageType=Folder flag
+    b.u32(0xFFFFFFFF);  // background
+    b.u32(0xFFFFFFFF);  // foreground
+    b.u32(0xFFFFFFFF);  // font
+    b.u32(0xFFFFFFFF);  // window styles
+    b.u32(0);           // ex window styles
+    b.u32(0xFFFFFFFF);
+    b.u32(0);           // frame name
+    b.u32(0xFFFFFFFF);  // window name
+    b.u32(0);           // info types
+    b.u32(1);
+    b.u32(0);  // merge files count
+    b.u32(0);
+    b.zeros(4096 - b.size());
+    return std::move(b.v);
+}
+
+std::vector<uint8_t> Compiler::buildSystem(const std::string& defaultWindow,
+                                           bool binaryToc, bool hasKLinks,
+                                           const std::vector<uint8_t>& idxhdr, bool fts) {
+    Buf b;
+    b.u32(3);
+    b.u16(10);
+    b.u16(4);
+    b.u32(static_cast<uint32_t>(time(nullptr)));
+    sysEntryStr(b, 9, "FastChm 0.2");
+    b.u16(4);
+    b.u16(36);
+    b.u32(lcid_);
+    b.u32(0);  // DBCS
+    b.u32(fts ? 1 : 0);
+    b.u32(hasKLinks ? 1 : 0);
+    b.u32(0);  // ALinks
+    b.u64(0);  // FILETIME
+    b.u32(0);
+    b.u32(0);
+    const std::string defTopic = slashes(p_.opt("default topic"));
+    if (!defTopic.empty()) sysEntryStr(b, 2, defTopic);
+    if (!p_.opt("title").empty()) sysEntryStr(b, 3, p_.opt("title"));
+    if (!p_.opt("default font").empty()) sysEntryStr(b, 16, p_.opt("default font"));
+    if (!hhcName_.empty()) sysEntryStr(b, 0, hhcName_);
+    if (!hhkName_.empty()) sysEntryStr(b, 1, hhkName_);
+    if (!defaultWindow.empty()) sysEntryStr(b, 5, defaultWindow);
+    if (!idxhdr.empty()) {  // binary index on
+        b.u16(7);
+        b.u16(4);
+        b.u32(0);
+    }
+    if (binaryToc) {
+        b.u16(11);
+        b.u16(4);
+        b.u32(0);
+    }
+    if (!idxhdr.empty()) {
+        b.u16(13);
+        b.u16(static_cast<uint16_t>(idxhdr.size()));
+        b.raw(idxhdr.data(), idxhdr.size());
+    }
+    return std::move(b.v);
+}
+
+bool Compiler::run(const std::string& outOverride, CompileStats& stats,
+                   std::string& outPathUsed, std::string& err) {
+    lcid_ = parseLcid(p_.opt("language"));
+    hhcName_ = slashes(p_.opt("contents file"));
+    hhkName_ = slashes(p_.opt("index file"));
+
     auto ensureListed = [&](const std::string& f) {
         if (f.empty()) return;
-        const std::string key = lowerCopy(f);
-        for (const std::string& existing : p.files)
-            if (lowerCopy(existing) == key) return;
-        p.files.push_back(f);
+        for (const std::string& existing : p_.files)
+            if (lowerCopy(existing) == lowerCopy(f)) return;
+        p_.files.push_back(f);
     };
-    ensureListed(hhcName);
-    ensureListed(hhkName);
-    if (p.files.empty()) {
+    ensureListed(hhcName_);
+    ensureListed(hhkName_);
+    if (p_.files.empty()) {
         err = "project has no [FILES]";
         return false;
     }
 
-    // ---- compressed section: content files, then #TOPICS/#URLSTR/#URLTBL/#STRINGS
-    StringsTable strings;
-    UrlTables urls;
-    TopicsTable topics(strings, urls);
+    if (!gatherFiles(err)) return false;
 
+    std::vector<Window> windows;
+    for (const std::string& line : p_.windowLines) windows.push_back(parseWindowLine(line));
+    std::string defaultWindow = p_.opt("default window");
+    if (defaultWindow.empty() && !windows.empty()) defaultWindow = windows[0].type;
+
+    // ---- compressed section ----
     std::vector<DirEntry> entries;
     Buf section1;
     auto addSec1 = [&](const std::string& archiveName, const std::vector<uint8_t>& data) {
@@ -339,41 +1187,73 @@ bool compileProject(const std::string& hhpPath, const std::string& outOverride,
         section1.raw(data.data(), data.size());
     };
 
-    for (const std::string& f : p.files) {
-        std::vector<uint8_t> data;
-        if (!readFile(p.dir + f, data)) {
-            err = "cannot read file: " + p.dir + f;
-            return false;
+    const std::vector<uint8_t> ivb = buildIvb();
+    if (!ivb.empty()) addSec1("/#IVB", ivb);
+    const bool ftsOption =
+        p_.optYes("full-text search") || p_.optYes("full text search");
+    if (ftsOption) addSec1("/$OBJINST", buildObjInst());
+
+    const bool ftsWanted = ftsOption;
+    for (const LoadedFile& lf : loaded_) {
+        addSec1("/" + lf.rel, lf.data);
+        if (isHtmlName(lf.rel)) {
+            const uint32_t topicIdx =
+                topics_.add(extractTitle(lf.data), "/" + lf.rel, -1);
+            if (ftsWanted) fts_.indexFile(lf.data, topicIdx);
         }
-        const std::string archiveName = "/" + f;
-        addSec1(archiveName, data);
-        if (lowerCopy(f).find(".ht") != std::string::npos)
-            topics.add(extractTitle(data), archiveName, -1);
     }
-    stats.fileCount = p.files.size();
+    stats.fileCount = loaded_.size();
 
-    if (!hhcName.empty()) topics.add("", hhcName, 2);
-    if (!hhkName.empty()) topics.add("", hhkName, 2);
+    if (!hhcName_.empty()) topics_.add("", hhcName_, 2);
+    if (!hhkName_.empty()) topics_.add("", hhkName_, 2);
 
-    if (topics.buf.size() != 0) addSec1("/#TOPICS", topics.buf.v);
-    if (urls.urlstr.size() != 0) addSec1("/#URLSTR", urls.urlstr.v);
-    if (urls.urltbl.size() != 0) addSec1("/#URLTBL", urls.urltbl.v);
-    if (strings.buf.size() == 0) strings.buf.u8(0);
-    addSec1("/#STRINGS", strings.buf.v);
+    // binary TOC / binary index (built before #TOPICS et al. are serialized:
+    // they add topics/strings and patch topic entries)
+    const bool binaryToc = p_.optYes("binary toc") && haveToc_;
+    const bool binaryIndex = p_.optYes("binary index") && haveIndex_;
+    std::vector<uint8_t> tocIdx;
+    if (binaryToc) tocIdx = TocIdxBuilder(strings_, topics_).build(toc_);
+    BinIndexFiles binIndex;
+    if (binaryIndex) binIndex = BinIndexBuilder(topics_).build(index_, lcid_);
+    std::vector<uint8_t> idxhdr;
+    if (binaryIndex) idxhdr = buildIdxHdr();
 
-    // ---- compress
+    if (topics_.buf.size() != 0) addSec1("/#TOPICS", topics_.buf.v);
+    if (urls_.urlstr.size() != 0) addSec1("/#URLSTR", urls_.urlstr.v);
+    if (urls_.urltbl.size() != 0) addSec1("/#URLTBL", urls_.urltbl.v);
+    if (!tocIdx.empty()) addSec1("/#TOCIDX", tocIdx);
+    if (binaryIndex) {
+        addSec1("/$WWKeywordLinks/BTree", binIndex.btree);
+        addSec1("/$WWKeywordLinks/Data", binIndex.data);
+        addSec1("/$WWKeywordLinks/Map", binIndex.map);
+        addSec1("/$WWKeywordLinks/Property", binIndex.property);
+        Buf alink;
+        alink.u32(0);
+        addSec1("/$WWAssociativeLinks/Property", alink.v);
+    }
+    const std::vector<uint8_t> windowsFile = buildWindows(windows);
+    if (!windowsFile.empty()) addSec1("/#WINDOWS", windowsFile);
+    if (!idxhdr.empty()) addSec1("/#IDXHDR", idxhdr);
+    if (strings_.buf.size() == 0) strings_.buf.u8(0);
+    addSec1("/#STRINGS", strings_.buf.v);
+    std::vector<uint8_t> fifti;
+    if (ftsWanted && fts_.hasData()) fifti = fts_.build(lcid_);
+    if (!fifti.empty()) addSec1("/$FIftiMain", fifti);
+
+    // ---- compress ----
     stats.uncompressedBytes = section1.size();
     const LzxResult lzx = lzxCompress(section1.v.data(), section1.size());
     stats.compressedBytes = lzx.data.size();
 
-    // ---- section 0: #ITBITS, #SYSTEM, ::DataSpace files, Content last
+    // ---- section 0 ----
     Buf section0;
     auto addSec0 = [&](const std::string& name, const std::vector<uint8_t>& data) {
         entries.push_back({name, 0, section0.size(), data.size()});
         section0.raw(data.data(), data.size());
     };
     entries.push_back({"/#ITBITS", 0, 0, 0});
-    addSec0("/#SYSTEM", buildSystem(p, lcid, hhcName, hhkName));
+    addSec0("/#SYSTEM", buildSystem(defaultWindow, binaryToc,
+                                    binIndex.keywordCount > 0, idxhdr, !fifti.empty()));
     addSec0("::DataSpace/NameList", buildNameList());
     addSec0("::DataSpace/Storage/MSCompressed/ControlData", buildControlData());
     {
@@ -386,32 +1266,37 @@ bool compileProject(const std::string& hhpPath, const std::string& outOverride,
         "::DataSpace/Storage/MSCompressed/Transform/"
         "{7FC28940-9D31-11D0-9B27-00A0C91E9C7C}/InstanceData/ResetTable",
         buildResetTable(section1.size(), lzx.data.size(), lzx.frameStarts));
-    // the LZX bytes are appended right after section 0; this entry points at them
     entries.push_back({"::DataSpace/Storage/MSCompressed/Content", 0, section0.size(),
                        lzx.data.size()});
 
-    // ---- output path
+    // ---- output ----
     std::string out = outOverride;
     if (out.empty()) {
-        const std::string compiled = slashes(p.opt("compiled file"));
-        if (!compiled.empty()) {
-            out = p.dir + compiled;
-        } else {
-            out = hhpPath;
-            const size_t dot = out.find_last_of('.');
-            out = (dot == std::string::npos ? out : out.substr(0, dot)) + ".chm";
-        }
+        const std::string compiled = slashes(p_.opt("compiled file"));
+        out = compiled.empty() ? "" : p_.dir + compiled;
     }
     outPathUsed = out;
-
-    if (!writeContainer(out, lcid, std::move(entries), section0.v, lzx.data, err))
+    if (!writeContainer(out, lcid_, std::move(entries), section0.v, lzx.data, err))
         return false;
-    stats.outputBytes = 0x78 /* headers */;  // refined below by file size query
-    {
-        std::ifstream f(out, std::ios::binary | std::ios::ate);
-        if (f) stats.outputBytes = static_cast<uint64_t>(f.tellg());
-    }
+    std::ifstream f(out, std::ios::binary | std::ios::ate);
+    if (f) stats.outputBytes = static_cast<uint64_t>(f.tellg());
     return true;
+}
+
+}  // namespace
+
+bool compileProject(const std::string& hhpPath, const std::string& outOverride,
+                    CompileStats& stats, std::string& outPathUsed, std::string& err) {
+    Project p;
+    if (!parseHhp(hhpPath, p, err)) return false;
+    std::string out = outOverride;
+    if (out.empty() && p.opt("compiled file").empty()) {
+        out = hhpPath;
+        const size_t dot = out.find_last_of('.');
+        out = (dot == std::string::npos ? out : out.substr(0, dot)) + ".chm";
+    }
+    Compiler c(p);
+    return c.run(out, stats, outPathUsed, err);
 }
 
 }  // namespace fastchm

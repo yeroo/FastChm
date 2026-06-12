@@ -8,8 +8,10 @@
 #include "lzx.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstring>
+#include <thread>
 
 namespace fastchm {
 namespace {
@@ -327,27 +329,29 @@ void parseInterval(const uint8_t* data, size_t start, size_t end, IntervalCoder&
 
 }  // namespace
 
-LzxResult lzxCompress(const uint8_t* input, size_t size) {
-    LzxResult res;
-    if (size == 0) return res;
+namespace {
 
-    const size_t padded = (size + FRAME - 1) / FRAME * FRAME;
-    res.paddedSize = padded;
-    std::vector<uint8_t> data(padded, 0);
-    std::memcpy(data.data(), input, size);
+struct IntervalOut {
+    std::vector<uint8_t> bytes;
+    std::vector<uint64_t> frameEnds;  // offsets within `bytes` after each frame
+};
 
-    BitWriter bw(res.data);
-    std::vector<int32_t> head(static_cast<size_t>(1) << HASH_BITS);
-    std::vector<int32_t> prev(INTERVAL);
+struct Scratch {
+    std::vector<int32_t> head = std::vector<int32_t>(static_cast<size_t>(1) << HASH_BITS);
+    std::vector<int32_t> prev = std::vector<int32_t>(INTERVAL);
+};
 
-    res.frameStarts.push_back(0);
+// Compresses one reset interval [start, end). Every interval starts 16-bit aligned
+// with fully reset state, so its bitstream is position-independent and intervals can
+// be compressed in parallel and concatenated.
+IntervalOut compressInterval(const uint8_t* data, size_t start, size_t end,
+                             Scratch& scratch) {
+    IntervalOut io;
+    BitWriter bw(io.bytes);
+    IntervalCoder coder;
+    parseInterval(data, start, end, coder, scratch.head, scratch.prev);
 
-    for (size_t start = 0; start < padded; start += INTERVAL) {
-        const size_t end = std::min(padded, start + INTERVAL);
-        IntervalCoder coder;
-        parseInterval(data.data(), start, end, coder, head, prev);
-
-        // trees
+    // trees
         uint8_t mainLen[MAIN_SYMS], lenLen[LEN_SYMS], alignedLen[ALIGNED_SYMS];
         uint16_t mainCode[MAIN_SYMS], lenCode[LEN_SYMS], alignedCode[ALIGNED_SYMS];
         huffLengths(coder.mainFreq, MAIN_SYMS, 16, mainLen);
@@ -374,45 +378,92 @@ LzxResult lzxCompress(const uint8_t* input, size_t size) {
         writeTree(bw, mainLen + NUM_CHARS, MAIN_SYMS - NUM_CHARS);
         writeTree(bw, lenLen, LEN_SYMS);
 
-        size_t inFrame = (start % FRAME);  // always 0: intervals are frame-aligned
-        for (uint32_t tok : coder.tokens) {
-            size_t tokBytes;
-            if (tok & 0x80000000u) {
-                const int lenM2 = static_cast<int>(tok & 0xFF);
-                const uint32_t footer = (tok >> 8) & 0x1FFFF;
-                const int slot = static_cast<int>((tok >> 25) & 0x3F);
-                const int lenHeader = std::min(lenM2, 7);
-                const int mainSym = NUM_CHARS + (slot << 3 | lenHeader);
-                bw.put(mainLen[mainSym], mainCode[mainSym]);
-                if (lenHeader == 7) {
-                    const int ls = lenM2 - 7;
-                    bw.put(lenLen[ls], lenCode[ls]);
-                }
-                const int eb = ST.extra[slot];
-                if (blockType == BLOCK_ALIGNED && eb >= 3) {
-                    bw.put(eb - 3, footer >> 3);
-                    bw.put(alignedLen[footer & 7], alignedCode[footer & 7]);
-                } else if (eb > 0) {
-                    bw.put(eb, footer);
-                }
-                tokBytes = static_cast<size_t>(lenM2) + MIN_MATCH;
-            } else {
-                bw.put(mainLen[tok], mainCode[tok]);
-                tokBytes = 1;
+    size_t inFrame = 0;  // intervals are frame-aligned
+    for (uint32_t tok : coder.tokens) {
+        size_t tokBytes;
+        if (tok & 0x80000000u) {
+            const int lenM2 = static_cast<int>(tok & 0xFF);
+            const uint32_t footer = (tok >> 8) & 0x1FFFF;
+            const int slot = static_cast<int>((tok >> 25) & 0x3F);
+            const int lenHeader = std::min(lenM2, 7);
+            const int mainSym = NUM_CHARS + (slot << 3 | lenHeader);
+            bw.put(mainLen[mainSym], mainCode[mainSym]);
+            if (lenHeader == 7) {
+                const int ls = lenM2 - 7;
+                bw.put(lenLen[ls], lenCode[ls]);
             }
-            inFrame += tokBytes;
-            assert(inFrame <= FRAME);
-            if (inFrame == FRAME) {
-                bw.align16();
-                res.frameStarts.push_back(res.data.size());
-                inFrame = 0;
+            const int eb = ST.extra[slot];
+            if (blockType == BLOCK_ALIGNED && eb >= 3) {
+                bw.put(eb - 3, footer >> 3);
+                bw.put(alignedLen[footer & 7], alignedCode[footer & 7]);
+            } else if (eb > 0) {
+                bw.put(eb, footer);
             }
+            tokBytes = static_cast<size_t>(lenM2) + MIN_MATCH;
+        } else {
+            bw.put(mainLen[tok], mainCode[tok]);
+            tokBytes = 1;
         }
-        assert(inFrame == 0);
+        inFrame += tokBytes;
+        assert(inFrame <= FRAME);
+        if (inFrame == FRAME) {
+            bw.align16();
+            io.frameEnds.push_back(io.bytes.size());
+            inFrame = 0;
+        }
+    }
+    assert(inFrame == 0);
+    return io;
+}
+
+}  // namespace
+
+LzxResult lzxCompress(const uint8_t* input, size_t size) {
+    LzxResult res;
+    if (size == 0) return res;
+
+    const size_t padded = (size + FRAME - 1) / FRAME * FRAME;
+    res.paddedSize = padded;
+    std::vector<uint8_t> data(padded, 0);
+    std::memcpy(data.data(), input, size);
+
+    const size_t nIntervals = (padded + INTERVAL - 1) / INTERVAL;
+    std::vector<IntervalOut> outs(nIntervals);
+
+    const unsigned hw = std::thread::hardware_concurrency();
+    const size_t nThreads = std::min<size_t>(std::max(1u, hw), nIntervals);
+    if (nThreads <= 1) {
+        Scratch scratch;
+        for (size_t i = 0; i < nIntervals; i++)
+            outs[i] = compressInterval(data.data(), i * INTERVAL,
+                                       std::min(padded, (i + 1) * INTERVAL), scratch);
+    } else {
+        std::atomic<size_t> next{0};
+        std::vector<std::thread> pool;
+        pool.reserve(nThreads);
+        for (size_t t = 0; t < nThreads; t++) {
+            pool.emplace_back([&] {
+                Scratch scratch;
+                for (size_t i = next.fetch_add(1); i < nIntervals; i = next.fetch_add(1))
+                    outs[i] = compressInterval(data.data(), i * INTERVAL,
+                                               std::min(padded, (i + 1) * INTERVAL),
+                                               scratch);
+            });
+        }
+        for (std::thread& th : pool) th.join();
     }
 
-    // the final mark points past the last frame; the reset table only lists starts
-    res.frameStarts.pop_back();
+    // stitch: every interval is independently 16-bit aligned
+    size_t total = 0;
+    for (const IntervalOut& io : outs) total += io.bytes.size();
+    res.data.reserve(total);
+    for (const IntervalOut& io : outs) {
+        const uint64_t base = res.data.size();
+        res.frameStarts.push_back(base);
+        for (size_t j = 0; j + 1 < io.frameEnds.size(); j++)
+            res.frameStarts.push_back(base + io.frameEnds[j]);
+        res.data.insert(res.data.end(), io.bytes.begin(), io.bytes.end());
+    }
     assert(res.frameStarts.size() == padded / FRAME);
     return res;
 }
