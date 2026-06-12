@@ -1,0 +1,17 @@
+# build output
+out/
+fastchm.exe
+*.obj
+*.pdb
+
+# compiled help files and test artifacts
+*.chm
+test/decompiled/
+test/bigdec/
+test/big/
+test/hhview.png
+
+# downloaded format references (GPL/LGPL — not redistributed in this MIT repo;
+# see refs/NOTES.md for the condensed format documentation)
+refs/*
+!refs/NOTES.md

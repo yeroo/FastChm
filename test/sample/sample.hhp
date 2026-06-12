@@ -1,0 +1,15 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=sample.chm
+Contents file=toc.hhc
+Index file=index.hhk
+Default topic=index.htm
+Title=FastChm Sample Help
+Language=0x409 English (United States)
+
+[FILES]
+index.htm
+page2.htm
+style.css
+
+[INFOTYPES]
