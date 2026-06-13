@@ -112,11 +112,17 @@ master is opened and caches the combined index/search in a `<master>.chw` file
 
 ## Not yet implemented
 
-- `#SUBSETS`/`#INFOTYPES` are emitted structurally; the HH Workshop info-type
-  authoring semantics (per-topic type membership) are not modelled
-- Full-text search indexes ASCII/Latin word characters; East-Asian DBCS word
-  breaking is not modelled (the DBCS flag is set, but `$OBJINST` carries the
-  Western word-breaker tables)
+These are rarely-used features that can't be verified without reference output from
+HTML Help Workshop or the HtmlHelp API, so they are intentionally deferred rather
+than shipped untested:
+
+- `[TEXT POPUPS]` (compiled text-popup strings)
+- Per-topic information-type membership and subset filtering (`#SUBSETS`/`#INFOTYPES`
+  are emitted structurally, but topics are not tagged with types)
+- "See Also" associative keywords from in-topic `<object>` controls
+- East-Asian DBCS full-text word breaking (the DBCS flag is set and the codepage is
+  declared, but `$OBJINST` ships the Western word-breaker tables, and FTS indexes
+  ASCII/Latin word characters)
 - `--extract` writes user files (`/...`); it does not reconstruct an `.hhp`
   project the way `hh.exe -decompile` does
 
