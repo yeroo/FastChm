@@ -16,6 +16,10 @@ embedded in produced CHMs.
 - Encoding correctness: codepage/LCID derived from `Language` (or `Charset`); UTF-8 /
   UTF-16 / codepage source files decoded and metadata re-encoded into the project
   codepage; DBCS flag set. Replaces the previously hardcoded 1252/1033.
+- Sitemap "text/site properties" (image list, folder images, colours, font,
+  frame/window names) now flow from the `.hhc` into `#IDXHDR`.
+- LZX one-step lazy matching: ~1.6% smaller output on natural-language content
+  (neutral on highly repetitive data), output still bit-exact.
 
 ## 0.4
 

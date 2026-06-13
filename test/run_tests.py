@@ -175,6 +175,18 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # sitemap "text/site properties" (sample.hhc declares ImageType=Folder)
+    print("[siteprops] sample #IDXHDR folder flag")
+    tmp = tempfile.mkdtemp(prefix="fastchm_s_")
+    try:
+        subprocess.run([FASTCHM, "--extract",
+                        os.path.join(ROOT, "test", "sample", "sample.chm"), tmp],
+                       capture_output=True)
+        idx = open(os.path.join(tmp, "#IDXHDR"), "rb").read()
+        check("#IDXHDR ImageType=Folder flag set", len(idx) > 0x1C and idx[0x1C] == 1)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     # collection build
     print("[collection] test/collection/collection.hhp")
     rc, out = run_fastchm(["--collection",

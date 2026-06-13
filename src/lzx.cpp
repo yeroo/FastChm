@@ -29,6 +29,7 @@ constexpr int      MAX_MATCH = 257;
 constexpr uint32_t MAX_DIST = 0xFFFD;  // offsets wsize-2..wsize are illegal
 constexpr int      HASH_BITS = 15;
 constexpr int      MAX_CHAIN = 128;
+constexpr bool     LZX_LAZY = true;  // one-step lazy matching
 
 constexpr int BLOCK_VERBATIM = 1;
 constexpr int BLOCK_ALIGNED = 2;
@@ -237,8 +238,9 @@ size_t matchLen(const uint8_t* a, const uint8_t* b, size_t maxLen) {
     return i;
 }
 
-// Greedy LZ parse of one reset interval [start, end). `data` is the padded buffer;
-// hash structures are caller-provided scratch reused across intervals.
+// LZ parse of one reset interval [start, end) with one-step lazy matching. `data`
+// is the padded buffer; hash structures are caller-provided scratch reused across
+// intervals.
 void parseInterval(const uint8_t* data, size_t start, size_t end, IntervalCoder& coder,
                    std::vector<int32_t>& head, std::vector<int32_t>& prev) {
     std::fill(head.begin(), head.end(), -1);
@@ -257,68 +259,85 @@ void parseInterval(const uint8_t* data, size_t start, size_t end, IntervalCoder&
         }
     };
 
-    size_t pos = start;
-    while (pos < end) {
-        const size_t frameEnd = (pos / FRAME + 1) * FRAME;
+    struct Match {
+        size_t len = 0;
+        uint32_t dist = 0;
+        int rep = -1;  // 0/1/2 = R0/R1/R2, -1 = explicit offset
+    };
+
+    // Best match at p, reading current R0/R1/R2 without mutating any state.
+    auto findBest = [&](size_t p) -> Match {
+        Match m;
+        const size_t frameEnd = (p / FRAME + 1) * FRAME;
         const size_t maxLen =
-            std::min({static_cast<size_t>(MAX_MATCH), end - pos, frameEnd - pos});
-
-        size_t bestLen = 0;
-        uint32_t bestDist = 0;
-        int repSlot = -1;
-
-        if (maxLen >= static_cast<size_t>(MIN_MATCH)) {
-            // repeated offsets first; R0 may pay off from length 2, R1/R2 from 3
-            const uint32_t reps[3] = {R0, R1, R2};
-            for (int r = 0; r < 3; r++) {
-                if (reps[r] > pos - start) continue;  // source would precede the reset
-                size_t len = matchLen(data + pos - reps[r], data + pos, maxLen);
-                if (len >= static_cast<size_t>(r == 0 ? 2 : 3) && len > bestLen) {
-                    bestLen = len;
-                    bestDist = reps[r];
-                    repSlot = r;
-                }
-            }
-            if (pos + 2 < end) {
-                int chain = MAX_CHAIN;
-                for (int32_t cand = head[hashAt(pos)]; cand >= 0 && chain-- > 0;
-                     cand = prev[cand - start]) {
-                    const uint32_t dist = static_cast<uint32_t>(pos - cand);
-                    if (dist > MAX_DIST) break;
-                    if (bestLen > 0 && (bestLen >= maxLen ||
-                                        data[cand + bestLen] != data[pos + bestLen]))
-                        continue;
-                    size_t len = matchLen(data + cand, data + pos, maxLen);
-                    if (len <= bestLen || len < 3) continue;
-                    // skip matches whose footer bits likely cost more than literals
-                    const uint32_t fmt = dist + 2;
-                    if ((fmt >= 64 && len < 4) || (fmt >= 2048 && len < 5)) continue;
-                    bestLen = len;
-                    bestDist = dist;
-                    repSlot = -1;
-                }
+            std::min({static_cast<size_t>(MAX_MATCH), end - p, frameEnd - p});
+        if (maxLen < static_cast<size_t>(MIN_MATCH)) return m;
+        const uint32_t reps[3] = {R0, R1, R2};
+        for (int r = 0; r < 3; r++) {
+            if (reps[r] > p - start) continue;  // source would precede the reset
+            size_t len = matchLen(data + p - reps[r], data + p, maxLen);
+            if (len >= static_cast<size_t>(r == 0 ? 2 : 3) && len > m.len) {
+                m.len = len;
+                m.dist = reps[r];
+                m.rep = r;
             }
         }
-
-        if (bestLen >= 2) {
-            if (repSlot == 0) {
-                coder.addMatch(0, 0, static_cast<int>(bestLen));
-            } else if (repSlot == 1) {
-                std::swap(R0, R1);
-                coder.addMatch(1, 0, static_cast<int>(bestLen));
-            } else if (repSlot == 2) {
-                std::swap(R0, R2);
-                coder.addMatch(2, 0, static_cast<int>(bestLen));
-            } else {
-                R2 = R1;
-                R1 = R0;
-                R0 = bestDist;
-                const uint32_t fmt = bestDist + 2;
-                const int slot = slotFor(fmt);
-                coder.addMatch(slot, fmt - ST.base[slot], static_cast<int>(bestLen));
+        if (p + 2 < end) {
+            int chain = MAX_CHAIN;
+            for (int32_t cand = head[hashAt(p)]; cand >= 0 && chain-- > 0;
+                 cand = prev[cand - start]) {
+                const uint32_t dist = static_cast<uint32_t>(p - cand);
+                if (dist > MAX_DIST) break;
+                if (m.len > 0 &&
+                    (m.len >= maxLen || data[cand + m.len] != data[p + m.len]))
+                    continue;
+                size_t len = matchLen(data + cand, data + p, maxLen);
+                if (len <= m.len || len < 3) continue;
+                const uint32_t fmt = dist + 2;
+                if ((fmt >= 64 && len < 4) || (fmt >= 2048 && len < 5)) continue;
+                m.len = len;
+                m.dist = dist;
+                m.rep = -1;
             }
-            for (size_t p = pos; p < pos + bestLen; p++) insert(p);
-            pos += bestLen;
+        }
+        return m;
+    };
+
+    auto emitMatch = [&](const Match& m) {
+        if (m.rep == 0) {
+            coder.addMatch(0, 0, static_cast<int>(m.len));
+        } else if (m.rep == 1) {
+            std::swap(R0, R1);
+            coder.addMatch(1, 0, static_cast<int>(m.len));
+        } else if (m.rep == 2) {
+            std::swap(R0, R2);
+            coder.addMatch(2, 0, static_cast<int>(m.len));
+        } else {
+            R2 = R1;
+            R1 = R0;
+            R0 = m.dist;
+            const uint32_t fmt = m.dist + 2;
+            const int slot = slotFor(fmt);
+            coder.addMatch(slot, fmt - ST.base[slot], static_cast<int>(m.len));
+        }
+    };
+
+    size_t pos = start;
+    while (pos < end) {
+        Match m = findBest(pos);
+        if (m.len >= 2) {
+            // one-step lazy matching: if the next position starts a strictly longer
+            // match, emit a literal here and take that one instead.
+            insert(pos);
+            if (LZX_LAZY && m.len < static_cast<size_t>(MAX_MATCH) && pos + 1 < end &&
+                findBest(pos + 1).len > m.len) {
+                coder.addLiteral(data[pos]);
+                pos++;
+                continue;
+            }
+            emitMatch(m);
+            for (size_t p = pos + 1; p < pos + m.len; p++) insert(p);  // pos already in
+            pos += m.len;
         } else {
             coder.addLiteral(data[pos]);
             insert(pos);

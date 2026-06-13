@@ -1181,23 +1181,38 @@ std::vector<uint8_t> Compiler::buildWindows(const std::vector<Window>& windows) 
 
 // 4096-byte #IDXHDR (also duplicated as #SYSTEM code 13). Emitted with binary index.
 std::vector<uint8_t> Compiler::buildIdxHdr() {
+    // "text/site properties" from the .hhc: image list, colours, font, frame/window.
+    auto prop = [&](const char* name) -> std::string {
+        for (const auto& pr : toc_.properties)
+            if (pr.first == name) return pr.second;
+        return "";
+    };
+    auto strOrNone = [&](const std::string& v, uint32_t none) {
+        return v.empty() ? none : strings_.add(v);
+    };
+    auto colorOrNone = [&](const std::string& v) {
+        return v.empty() ? 0xFFFFFFFFu
+                         : static_cast<uint32_t>(strtoul(v.c_str(), nullptr, 0));
+    };
+    const bool folder = lowerCopy(prop("imagetype")) == "folder";
+
     Buf b;
     b.raw("T#SM", 4);
     b.u32(0);  // timestamp/checksum
     b.u32(1);
     b.u32(topics_.count());
     b.u32(0);
-    b.u32(0xFFFFFFFF);  // ImageList string ("none")
+    b.u32(strOrNone(prop("imagelist"), 0xFFFFFFFF));
     b.u32(0);
-    b.u32(0);           // ImageType=Folder flag
-    b.u32(0xFFFFFFFF);  // background
-    b.u32(0xFFFFFFFF);  // foreground
-    b.u32(0xFFFFFFFF);  // font
+    b.u32(folder ? 1 : 0);                  // ImageType=Folder flag
+    b.u32(colorOrNone(prop("background")));
+    b.u32(colorOrNone(prop("foreground")));
+    b.u32(strOrNone(prop("font"), 0xFFFFFFFF));
     b.u32(0xFFFFFFFF);  // window styles
     b.u32(0);           // ex window styles
     b.u32(0xFFFFFFFF);
-    b.u32(0);           // frame name
-    b.u32(0xFFFFFFFF);  // window name
+    b.u32(strOrNone(prop("framename"), 0));         // frame name
+    b.u32(strOrNone(prop("windowname"), 0xFFFFFFFF));  // window name
     b.u32(0);           // info types
     b.u32(1);
     b.u32(static_cast<uint32_t>(p_.mergeFiles.size()));
