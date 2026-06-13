@@ -7,6 +7,7 @@ standard library.
 
 ```
 fastchm <project.hhp> [-o output.chm]
+fastchm --collection <master.hhp>      # build a master + its [MERGE FILES] children
 ```
 
 ## Features
@@ -29,7 +30,8 @@ fastchm <project.hhp> [-o output.chm]
   (`param name="Keyword"` / `"ALink Name"`) — real `$WWKeywordLinks` and
   `$WWAssociativeLinks` BTrees; object keywords merge into the binary index.
 - **Collections**: `[MERGE FILES]` (recorded in `#IDXHDR`), `[SUBSETS]`
-  (`#SUBSETS`), and `[INFOTYPES]` (`#SYSTEM` info-type count).
+  (`#SUBSETS`), and `[INFOTYPES]` (`#SYSTEM` info-type count). `--collection`
+  compiles a master plus every child CHM it references, in one command.
 - **Full-text search**: `$FIftiMain` word index (scale/root bit coding,
   prefix-compressed word tree) plus the `$OBJINST` word-breaker blob, when
   `Full-text search=Yes`. Phrase queries work (word positions are indexed).
@@ -57,13 +59,52 @@ hh.exe -decompile test\decompiled test\sample\sample.chm
 The sample project exercises auto-inclusion, window definitions, context IDs,
 binary TOC/index, full-text search and ALink/KLink object controls.
 `test\feat\feat.hhp` additionally covers `[MERGE FILES]`, `[SUBSETS]` and
-`[INFOTYPES]`.
+`[INFOTYPES]`, and `test\collection\` is a two-child merged collection built with
+`fastchm --collection test\collection\collection.hhp`.
+
+## Collections (merged help)
+
+A collection is a *master* CHM that merges the tables of contents, indexes and
+full-text search of several *child* CHMs at runtime. To build one:
+
+1. Author each child as a normal project (its own `.hhp`/`.hhc`/`.hhk`).
+2. In the master `.hhp`, list the children under `[MERGE FILES]`, and in the
+   master `.hhc` reference each child's contents with a `Merge` param, ideally
+   wrapped in a named book entry:
+
+   ```html
+   <LI> <OBJECT type="text/sitemap"><param name="Name" value="Apples"></OBJECT>
+   <UL>
+     <LI> <OBJECT type="text/sitemap">
+          <param name="Name" value="Apples">
+          <param name="Merge" value="apple.chm::/apple.hhc">
+          </OBJECT>
+   </UL>
+   ```
+3. Build everything in one step:
+
+   ```
+   fastchm --collection master.hhp
+   ```
+
+   This compiles the master and every `child.chm` named in `[MERGE FILES]`
+   (from `child.hhp` or `child/child.hhp` next to the master), writing all CHMs
+   into the master's folder. A child that has no `.hhp` is left as a prebuilt
+   `.chm`.
+
+Ship all the CHMs in the same directory. `hh.exe` performs the merge when the
+master is opened and caches the combined index/search in a `<master>.chw` file
+(so the folder must be writable at first run) — the compiler does not produce the
+`.chw`. See `test/collection/` for a worked two-child example.
+
+> Note: `hh.exe`'s runtime merge labels the *first* merged sub-tree "untitled"
+> regardless of the authored name — a long-standing HTML Help quirk, not a
+> property of the compiled files (each child shows its real name standalone and
+> in any non-first position). Wrapping merges in named book entries, as above,
+> keeps the section headings correct.
 
 ## Not yet implemented
 
-- Actually *building* a merged collection (`[MERGE FILES]` is recorded in the
-  metadata, but FastChm compiles one `.chm` at a time — it does not stitch the
-  referenced files into a master collection)
 - `#SUBSETS`/`#INFOTYPES` are emitted structurally; the HH Workshop info-type
   authoring semantics (per-topic type membership) are not modelled
 - CHM decompilation (use `hh.exe -decompile`)

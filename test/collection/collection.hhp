@@ -1,0 +1,21 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=collection.chm
+Contents file=collection.hhc
+Index file=collection.hhk
+Default topic=welcome.htm
+Default Window=main
+Title=Fruit Collection
+Language=0x409
+Binary Index=Yes
+Full-text search=Yes
+
+[WINDOWS]
+main="Fruit Collection","collection.hhc","collection.hhk","welcome.htm","welcome.htm",,,,,0x63520,260,0x10384e,[20,20,900,680],,,,,,,0
+
+[FILES]
+welcome.htm
+
+[MERGE FILES]
+apple.chm
+orange.chm

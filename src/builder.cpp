@@ -1196,7 +1196,7 @@ std::vector<uint8_t> Compiler::buildSystem(const std::string& defaultWindow,
     b.u16(10);
     b.u16(4);
     b.u32(static_cast<uint32_t>(time(nullptr)));
-    sysEntryStr(b, 9, "FastChm 0.3");
+    sysEntryStr(b, 9, "FastChm 0.4");
     b.u16(4);
     b.u16(36);
     b.u32(lcid_);
@@ -1401,6 +1401,58 @@ bool compileProject(const std::string& hhpPath, const std::string& outOverride,
     }
     Compiler c(p);
     return c.run(out, stats, outPathUsed, err);
+}
+
+bool compileCollection(const std::string& masterHhp, std::vector<CollectionMember>& out,
+                       std::string& err) {
+    Project master;
+    if (!parseHhp(masterHhp, master, err)) return false;
+    const std::string dir = master.dir;  // master directory, trailing slash or empty
+
+    auto fileExists = [](const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        return static_cast<bool>(f);
+    };
+    auto stem = [](const std::string& chm) {
+        std::string s = chm;
+        const size_t sl = s.find_last_of('/');
+        if (sl != std::string::npos) s = s.substr(sl + 1);
+        const size_t dot = s.find_last_of('.');
+        return dot == std::string::npos ? s : s.substr(0, dot);
+    };
+
+    // children first, so they exist before the master is opened
+    for (const std::string& mf : master.mergeFiles) {
+        const std::string name = stem(mf);
+        CollectionMember m;
+        m.chm = dir + name + ".chm";
+        const std::string flat = dir + name + ".hhp";
+        const std::string nested = dir + name + "/" + name + ".hhp";
+        const std::string childHhp =
+            fileExists(flat) ? flat : (fileExists(nested) ? nested : "");
+        if (childHhp.empty()) {
+            m.reused = true;
+            m.ok = fileExists(m.chm);
+            if (!m.ok) m.err = "no " + name + ".hhp and no prebuilt " + name + ".chm";
+            out.push_back(std::move(m));
+            continue;
+        }
+        m.hhp = childHhp;
+        std::string used;
+        m.ok = compileProject(childHhp, m.chm, m.stats, used, m.err);
+        out.push_back(std::move(m));
+    }
+
+    // master last
+    CollectionMember mm;
+    mm.isMaster = true;
+    mm.hhp = masterHhp;
+    std::string used;
+    mm.ok = compileProject(masterHhp, "", mm.stats, used, mm.err);
+    mm.chm = used;
+    out.push_back(std::move(mm));
+
+    return true;
 }
 
 }  // namespace fastchm

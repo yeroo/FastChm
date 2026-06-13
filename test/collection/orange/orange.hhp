@@ -1,0 +1,15 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=orange.chm
+Contents file=orange.hhc
+Index file=orange.hhk
+Default topic=orange1.htm
+Title=Oranges
+Language=0x409
+Binary TOC=Yes
+Binary Index=Yes
+Full-text search=Yes
+
+[FILES]
+orange1.htm
+orange2.htm

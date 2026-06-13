@@ -1,0 +1,19 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=apple.chm
+Contents file=apple.hhc
+Index file=apple.hhk
+Default topic=apple1.htm
+Default Window=main
+Title=Apples
+Language=0x409
+Binary TOC=Yes
+Binary Index=Yes
+Full-text search=Yes
+
+[WINDOWS]
+main="Apples","apple.hhc","apple.hhk","apple1.htm","apple1.htm",,,,,0x63520,260,0x10384e,[20,20,860,640],,,,,,,0
+
+[FILES]
+apple1.htm
+apple2.htm

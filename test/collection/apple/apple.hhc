@@ -1,0 +1,19 @@
+<!DOCTYPE HTML PUBLIC "-//IETF//DTD HTML//EN">
+<HTML><HEAD></HEAD><BODY>
+<UL>
+	<LI> <OBJECT type="text/sitemap">
+		<param name="Name" value="Apples">
+		<param name="Local" value="apple1.htm">
+		</OBJECT>
+	<UL>
+		<LI> <OBJECT type="text/sitemap">
+			<param name="Name" value="Red Apples">
+			<param name="Local" value="apple1.htm">
+			</OBJECT>
+		<LI> <OBJECT type="text/sitemap">
+			<param name="Name" value="Green Apples">
+			<param name="Local" value="apple2.htm">
+			</OBJECT>
+	</UL>
+</UL>
+</BODY></HTML>
