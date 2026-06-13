@@ -37,6 +37,11 @@ fastchm --extract <file.chm> <dir>     # extract user files (built-in LZX decode
 - **Full-text search**: `$FIftiMain` word index (scale/root bit coding,
   prefix-compressed word tree) plus the `$OBJINST` word-breaker blob, when
   `Full-text search=Yes`. Phrase queries work (word positions are indexed).
+- **Encoding**: the codepage and LCID are derived from `[OPTIONS] Language`
+  (override with `Charset=`). Source files declared UTF-8 (BOM or
+  `<meta charset>`), UTF-16 (BOM), or a Windows codepage are decoded and the
+  metadata (TOC titles, index keywords) is re-encoded into the project codepage /
+  UTF-16 correctly. Content files are stored verbatim.
 
 Output opens in `hh.exe` with working TOC/Index/Search panes and survives
 `hh.exe -decompile` with byte-identical files (verified with a 402-file / 1.8 MB
@@ -109,6 +114,9 @@ master is opened and caches the combined index/search in a `<master>.chw` file
 
 - `#SUBSETS`/`#INFOTYPES` are emitted structurally; the HH Workshop info-type
   authoring semantics (per-topic type membership) are not modelled
+- Full-text search indexes ASCII/Latin word characters; East-Asian DBCS word
+  breaking is not modelled (the DBCS flag is set, but `$OBJINST` carries the
+  Western word-breaker tables)
 - `--extract` writes user files (`/...`); it does not reconstruct an `.hhp`
   project the way `hh.exe -decompile` does
 

@@ -17,6 +17,7 @@
 #include "lzx.h"
 #include "objinst_data.h"
 #include "sitemap.h"
+#include "textenc.h"
 #include "version.h"
 
 namespace fastchm {
@@ -301,28 +302,45 @@ Window parseWindowLine(const std::string& rawLine) {
 
 // ---------------- HTML scanning ----------------
 
-std::string extractTitle(const std::vector<uint8_t>& html) {
-    const std::string text(html.begin(), html.end());
-    const std::string lower = lowerCopy(text);
-    size_t t = lower.find("<title");
+// Extracts the <title>, decoding the file's encoding (UTF-8/UTF-16 BOM, charset, or
+// `cp`) and returning the text re-encoded in `cp` for storage in #STRINGS.
+std::string extractTitle(const std::vector<uint8_t>& html, uint32_t cp) {
+    const std::vector<uint32_t> cps = decodeText(html.data(), html.size(), cp);
+    auto lc = [](uint32_t c) { return (c >= 'A' && c <= 'Z') ? c + 32 : c; };
+    auto find = [&](const char* pat, size_t from) -> size_t {
+        size_t plen = 0;
+        while (pat[plen]) plen++;
+        for (size_t i = from; i + plen <= cps.size(); i++) {
+            bool ok = true;
+            for (size_t j = 0; j < plen; j++)
+                if (lc(cps[i + j]) != static_cast<uint32_t>(pat[j])) {
+                    ok = false;
+                    break;
+                }
+            if (ok) return i;
+        }
+        return std::string::npos;
+    };
+    size_t t = find("<title", 0);
     if (t == std::string::npos) return "";
-    t = lower.find('>', t);
-    if (t == std::string::npos) return "";
-    const size_t end = lower.find("</title", ++t);
+    while (t < cps.size() && cps[t] != '>') t++;
+    if (t >= cps.size()) return "";
+    t++;
+    const size_t end = find("</title", t);
     if (end == std::string::npos) return "";
-    std::string title = text.substr(t, end - t);
-    std::string outs;
+    std::vector<uint32_t> title;
     bool ws = false;
-    for (char c : title) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            ws = !outs.empty();
+    for (size_t i = t; i < end; i++) {
+        const uint32_t c = cps[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            ws = !title.empty();
         } else {
-            if (ws) outs.push_back(' ');
+            if (ws) title.push_back(' ');
             ws = false;
-            outs.push_back(c);
+            title.push_back(c);
         }
     }
-    return outs;
+    return encodeCodepage(title, cp);
 }
 
 bool isWordChar(char c) {
@@ -675,7 +693,7 @@ struct BinIndexFiles {
 // Assembles the BTree/Data/Map/Property quad from pre-serialized keyword entries
 // (already sorted by key). Shared by KLinks, ALinks and the .hhk binary index.
 BinIndexFiles assembleBTree(const std::vector<std::vector<uint8_t>>& entries,
-                            uint32_t lcid) {
+                            uint32_t lcid, uint32_t codepage) {
     // pack entries into 2048-byte listing blocks
     const size_t BS = 2048;
         std::vector<std::vector<uint8_t>> listBlocks;     // payloads (no header)
@@ -776,7 +794,7 @@ BinIndexFiles assembleBTree(const std::vector<std::vector<uint8_t>>& entries,
         bt.u32(totalBlocks);
         bt.u16(static_cast<uint16_t>(1 + levels.size()));  // tree depth
         bt.u32(static_cast<uint32_t>(entries.size()));
-        bt.u32(1252);
+        bt.u32(codepage);
         bt.u32(lcid);
         bt.u32(1);  // CHM (not CHW)
         bt.u32(10031);
@@ -857,7 +875,7 @@ struct KeywordEntry {
 // then emits one BTree quad.
 class BTreeBuilder {
 public:
-    explicit BTreeBuilder(TopicsTable& topics) : topics_(topics) {}
+    BTreeBuilder(TopicsTable& topics, uint32_t cp) : topics_(topics), cp_(cp) {}
 
     void addSiteMap(const SiteMap& sm) {
         std::vector<const SiteMapItem*> top;
@@ -882,7 +900,7 @@ public:
 
     bool empty() const { return entries_.empty() && flat_.empty(); }
 
-    BinIndexFiles assemble(uint32_t lcid) {
+    BinIndexFiles assemble(uint32_t lcid, uint32_t codepage) {
         for (auto& kv : flat_) entries_.push_back(std::move(kv.second));
         std::stable_sort(entries_.begin(), entries_.end(),
                          [](const KeywordEntry& a, const KeywordEntry& b) {
@@ -892,13 +910,13 @@ public:
         blobs.reserve(entries_.size());
         for (size_t i = 0; i < entries_.size(); i++)
             blobs.push_back(serialize(entries_[i], static_cast<uint32_t>(i)));
-        return assembleBTree(blobs, lcid);
+        return assembleBTree(blobs, lcid, codepage);
     }
 
 private:
-    static std::vector<uint8_t> serialize(const KeywordEntry& e, uint32_t seq) {
+    std::vector<uint8_t> serialize(const KeywordEntry& e, uint32_t seq) const {
         Buf b;
-        for (unsigned char c : e.display) b.u16(c);  // ANSI -> UTF-16
+        appendUtf16le(b.v, decodeAuto(e.display, cp_));
         b.u16(0);
         b.u16(e.seeAlso ? 2 : 0);
         b.u16(e.depth);
@@ -906,7 +924,7 @@ private:
         b.u32(0);
         if (e.seeAlso) {
             b.u32(1);
-            for (unsigned char c : e.seeAlsoTarget) b.u16(c);
+            appendUtf16le(b.v, decodeAuto(e.seeAlsoTarget, cp_));
             b.u16(0);
         } else {
             b.u32(static_cast<uint32_t>(e.topicIds.size()));
@@ -950,6 +968,7 @@ private:
     }
 
     TopicsTable& topics_;
+    uint32_t cp_;
     std::vector<KeywordEntry> entries_;
     std::map<std::string, KeywordEntry> flat_;
 };
@@ -958,7 +977,7 @@ private:
 
 // Word-breaker / stemmer instantiation data required by the HH full-text search
 // engine. Fixed content; byte layout as produced by hhc.exe.
-std::vector<uint8_t> buildObjInst() {
+std::vector<uint8_t> buildObjInst(uint32_t cp, uint32_t lcid) {
     static const uint8_t gWordBreaker[8] = {0x9A, 0x56, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0xF7};
     static const uint8_t gStemmer[8] = {0x9A, 0x61, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0xF7};
     static const uint8_t gSystemSort[8] = {0x9A, 0x56, 0x00, 0xC0, 0x4F, 0xB6, 0x8B, 0x66};
@@ -973,8 +992,8 @@ std::vector<uint8_t> buildObjInst() {
     b.guid(0x4662DAAF, 0xD393, 0x11D0, gWordBreaker);
     b.u32(0x04000000);
     b.u32(11);  // flags
-    b.u32(1252);
-    b.u32(1033);
+    b.u32(cp);
+    b.u32(lcid);
     b.u32(0);
     b.u32(0);
     b.u32(0x00145555);
@@ -993,14 +1012,14 @@ std::vector<uint8_t> buildObjInst() {
     b.guid(0x8FA0D5A8, 0xDEDF, 0x11D0, gStemmer);
     b.u32(0x04000000);
     b.u32(1);
-    b.u32(1252);
-    b.u32(1033);
+    b.u32(cp);
+    b.u32(lcid);
     b.u32(0);
     // entry 2: system sort {4662DAB0-D393-11D0-9A56-00C04FB68B66}
     b.guid(0x4662DAB0, 0xD393, 0x11D0, gSystemSort);
     b.u32(666);
-    b.u32(1252);
-    b.u32(1033);
+    b.u32(cp);
+    b.u32(lcid);
     b.u32(10031);
     b.u32(0);
     return std::move(b.v);
@@ -1031,6 +1050,7 @@ private:
 
     Project p_;
     uint32_t lcid_ = 0x409;
+    uint32_t cp_ = 1252;
     std::string hhcName_, hhkName_;
     std::vector<LoadedFile> loaded_;
     SiteMap toc_, index_;
@@ -1201,7 +1221,7 @@ std::vector<uint8_t> Compiler::buildSystem(const std::string& defaultWindow,
     b.u16(4);
     b.u16(36);
     b.u32(lcid_);
-    b.u32(0);  // DBCS
+    b.u32(isDbcsCodepage(cp_) ? 1 : 0);  // DBCS
     b.u32(fts ? 1 : 0);
     b.u32(hasKLinks ? 1 : 0);
     b.u32(hasALinks ? 1 : 0);
@@ -1241,6 +1261,9 @@ std::vector<uint8_t> Compiler::buildSystem(const std::string& defaultWindow,
 bool Compiler::run(const std::string& outOverride, CompileStats& stats,
                    std::string& outPathUsed, std::string& err) {
     lcid_ = parseLcid(p_.opt("language"));
+    cp_ = p_.opt("charset").empty()
+              ? codepageForLcid(lcid_)
+              : static_cast<uint32_t>(strtoul(p_.opt("charset").c_str(), nullptr, 0));
     hhcName_ = slashes(p_.opt("contents file"));
     hhkName_ = slashes(p_.opt("index file"));
 
@@ -1276,15 +1299,15 @@ bool Compiler::run(const std::string& outOverride, CompileStats& stats,
     if (!ivb.empty()) addSec1("/#IVB", ivb);
     const bool ftsOption =
         p_.optYes("full-text search") || p_.optYes("full text search");
-    if (ftsOption) addSec1("/$OBJINST", buildObjInst());
+    if (ftsOption) addSec1("/$OBJINST", buildObjInst(cp_, lcid_));
 
     const bool ftsWanted = ftsOption;
-    BTreeBuilder klinks(topics_), alinks(topics_);
+    BTreeBuilder klinks(topics_, cp_), alinks(topics_, cp_);
     for (const LoadedFile& lf : loaded_) {
         addSec1("/" + lf.rel, lf.data);
         if (isHtmlName(lf.rel)) {
             const uint32_t topicIdx =
-                topics_.add(extractTitle(lf.data), "/" + lf.rel, -1);
+                topics_.add(extractTitle(lf.data, cp_), "/" + lf.rel, -1);
             if (ftsWanted) fts_.indexFile(lf.data, topicIdx);
             const LinkObjects lo = scanLinkObjects(lf.data.data(), lf.data.size());
             for (const std::string& kw : lo.keywords) klinks.addKeyword(kw, topicIdx);
@@ -1307,8 +1330,8 @@ bool Compiler::run(const std::string& outOverride, CompileStats& stats,
     const bool haveKLinks = !klinks.empty();
     const bool haveALinks = !alinks.empty();
     BinIndexFiles kFiles, aFiles;
-    if (haveKLinks) kFiles = klinks.assemble(lcid_);
-    if (haveALinks) aFiles = alinks.assemble(lcid_);
+    if (haveKLinks) kFiles = klinks.assemble(lcid_, cp_);
+    if (haveALinks) aFiles = alinks.assemble(lcid_, cp_);
 
     // #IDXHDR is emitted for the binary-index tab and also to carry [MERGE FILES]
     std::vector<uint8_t> idxhdr;
@@ -1342,7 +1365,7 @@ bool Compiler::run(const std::string& outOverride, CompileStats& stats,
     if (strings_.buf.size() == 0) strings_.buf.u8(0);
     addSec1("/#STRINGS", strings_.buf.v);
     std::vector<uint8_t> fifti;
-    if (ftsWanted && fts_.hasData()) fifti = fts_.build(lcid_);
+    if (ftsWanted && fts_.hasData()) fifti = fts_.build(lcid_, cp_);
     if (!fifti.empty()) addSec1("/$FIftiMain", fifti);
 
     // ---- compress ----

@@ -1,0 +1,11 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=utf8.chm
+Contents file=utf8.hhc
+Default topic=cafe.htm
+Title=UTF-8 Title Test
+Language=0x409
+Binary Index=Yes
+
+[FILES]
+cafe.htm

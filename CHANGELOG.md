@@ -3,14 +3,19 @@
 All notable changes to FastChm. Versions follow the `#SYSTEM` compiler-id string
 embedded in produced CHMs.
 
-## Unreleased
+## 0.5
 
 - Test harness (`test/run_tests.py`) that compiles every sample project, asserts the
-  expected internal CHM files exist, and round-trips through `hh.exe -decompile`.
+  expected internal CHM files exist, and round-trips through both FastChm's own reader
+  and `hh.exe -decompile` (50 checks).
 - CMake build (`CMakeLists.txt`) with a `ctest` target; `build.bat` still works.
 - GitHub Actions CI (Windows): configure, build, test on push/PR.
 - `--version` / `-v` flag; version centralized in `src/version.h`.
 - Removed the one MSVC-specific call (`fopen_s`) for portable C++17.
+- `--list` / `--extract`: built-in LZX decoder + ITSF reader (read side / decompiler).
+- Encoding correctness: codepage/LCID derived from `Language` (or `Charset`); UTF-8 /
+  UTF-16 / codepage source files decoded and metadata re-encoded into the project
+  codepage; DBCS flag set. Replaces the previously hardcoded 1252/1033.
 
 ## 0.4
 

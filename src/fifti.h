@@ -14,7 +14,7 @@ public:
     void indexFile(const std::vector<uint8_t>& html, uint32_t topicIndex);
 
     // Builds the complete $FIftiMain file; empty when nothing was indexed.
-    std::vector<uint8_t> build(uint32_t lcid) const;
+    std::vector<uint8_t> build(uint32_t lcid, uint32_t codepage) const;
 
     bool hasData() const { return fileCount_ > 0 && !words_.empty(); }
 

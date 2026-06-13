@@ -348,7 +348,7 @@ void FtsIndexer::indexFile(const std::vector<uint8_t>& html, uint32_t topicIndex
     }
 }
 
-std::vector<uint8_t> FtsIndexer::build(uint32_t lcid) const {
+std::vector<uint8_t> FtsIndexer::build(uint32_t lcid, uint32_t codepage) const {
     if (!hasData()) return {};
     Buf file;
     file.zeros(0x400);  // header written last
@@ -396,7 +396,7 @@ std::vector<uint8_t> FtsIndexer::build(uint32_t lcid) const {
     h.u32(0);
     h.u32(fileCount_ - 1);
     h.zeros(24);
-    h.u32(1252);
+    h.u32(codepage);
     h.u32(lcid);
     std::copy(h.v.begin(), h.v.end(), file.v.begin());
     return std::move(file.v);

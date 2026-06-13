@@ -159,6 +159,22 @@ def main():
     test_project(os.path.join(ROOT, "test", "big", "big.hhp"),
                  common + ["/$FIftiMain"])
 
+    # UTF-8 source title must be re-encoded into the project codepage (cp1252 here),
+    # not stored as raw UTF-8 bytes.
+    test_project(os.path.join(ROOT, "test", "utf8", "utf8.hhp"), common)
+    print("[unicode] utf8 #STRINGS codepage check")
+    tmp = tempfile.mkdtemp(prefix="fastchm_u_")
+    try:
+        subprocess.run([FASTCHM, "--extract",
+                        os.path.join(ROOT, "test", "utf8", "utf8.chm"), tmp],
+                       capture_output=True)
+        strings = open(os.path.join(tmp, "#STRINGS"), "rb").read()
+        check("title stored as cp1252 (0xE9/0xFC present)",
+              0xE9 in strings and 0xFC in strings, strings.hex())
+        check("title not raw UTF-8 (no 0xC3 lead byte)", 0xC3 not in strings)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     # collection build
     print("[collection] test/collection/collection.hhp")
     rc, out = run_fastchm(["--collection",

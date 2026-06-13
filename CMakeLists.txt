@@ -15,6 +15,7 @@ add_executable(fastchm
   src/chmreader.cpp
   src/sitemap.cpp
   src/fifti.cpp
+  src/textenc.cpp
   src/builder.cpp
   src/main.cpp)
 
