@@ -8,6 +8,8 @@ standard library.
 ```
 fastchm <project.hhp> [-o output.chm]
 fastchm --collection <master.hhp>      # build a master + its [MERGE FILES] children
+fastchm --list <file.chm>              # list internal files
+fastchm --extract <file.chm> <dir>     # extract user files (built-in LZX decoder)
 ```
 
 ## Features
@@ -107,7 +109,8 @@ master is opened and caches the combined index/search in a `<master>.chw` file
 
 - `#SUBSETS`/`#INFOTYPES` are emitted structurally; the HH Workshop info-type
   authoring semantics (per-topic type membership) are not modelled
-- CHM decompilation (use `hh.exe -decompile`)
+- `--extract` writes user files (`/...`); it does not reconstruct an `.hhp`
+  project the way `hh.exe -decompile` does
 
 ## Format references
 

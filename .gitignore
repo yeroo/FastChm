@@ -13,6 +13,7 @@ __pycache__/
 test/decompiled/
 test/bigdec/
 test/big/
+test/xbig/
 test/*.png
 
 # downloaded format references (GPL/LGPL — not redistributed in this MIT repo;

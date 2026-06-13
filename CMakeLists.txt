@@ -10,7 +10,9 @@ endif()
 
 add_executable(fastchm
   src/lzx.cpp
+  src/lzxdecode.cpp
   src/chmwriter.cpp
+  src/chmreader.cpp
   src/sitemap.cpp
   src/fifti.cpp
   src/builder.cpp

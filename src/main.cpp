@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "builder.h"
+#include "chmreader.h"
 #include "version.h"
 
 static void printStats(const char* path, const fastchm::CompileStats& s) {
@@ -13,6 +14,17 @@ static void printStats(const char* path, const fastchm::CompileStats& s) {
            static_cast<unsigned long long>(s.compressedBytes),
            s.uncompressedBytes ? 100.0 * s.compressedBytes / s.uncompressedBytes : 0.0,
            static_cast<unsigned long long>(s.outputBytes));
+}
+
+static int usage() {
+    printf("FastChm %s — zero-dependency CHM compiler/reader\n"
+           "usage: fastchm <project.hhp> [-o output.chm]\n"
+           "       fastchm --collection <master.hhp>   build master + [MERGE FILES] children\n"
+           "       fastchm --list <file.chm>           list internal files\n"
+           "       fastchm --extract <file.chm> <dir>  extract user files\n"
+           "       fastchm --version\n",
+           FASTCHM_VERSION);
+    return 2;
 }
 
 int main(int argc, char** argv) {
@@ -24,6 +36,12 @@ int main(int argc, char** argv) {
             out = argv[++i];
         } else if (arg == "-c" || arg == "--collection") {
             collection = true;
+        } else if (arg == "-l" || arg == "--list") {
+            if (i + 1 >= argc) return usage();
+            return fastchm::chmList(argv[i + 1]);
+        } else if (arg == "-x" || arg == "--extract") {
+            if (i + 2 >= argc) return usage();
+            return fastchm::chmExtract(argv[i + 1], argv[i + 2]);
         } else if (arg == "-v" || arg == "--version") {
             printf("FastChm %s\n", FASTCHM_VERSION);
             return 0;
@@ -37,14 +55,7 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
-    if (hhp.empty()) {
-        printf("FastChm %s — zero-dependency CHM compiler\n"
-               "usage: fastchm <project.hhp> [-o output.chm]\n"
-               "       fastchm --collection <master.hhp>   build master + [MERGE FILES] children\n"
-               "       fastchm --version\n",
-               FASTCHM_VERSION);
-        return 2;
-    }
+    if (hhp.empty()) return usage();
 
     const auto t0 = std::chrono::steady_clock::now();
 

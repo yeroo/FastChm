@@ -57,6 +57,27 @@ def source_files(proj_dir):
     return out
 
 
+def extract_roundtrip(proj_dir, chm):
+    """Round-trips through FastChm's own --extract (self-contained, no hh.exe)."""
+    tmp = tempfile.mkdtemp(prefix="fastchm_x_")
+    try:
+        subprocess.run([FASTCHM, "--extract", os.path.abspath(chm), tmp],
+                       capture_output=True)
+        srcs = source_files(proj_dir)
+        checked, bad = 0, []
+        for root, _dirs, files in os.walk(tmp):
+            for f in files:
+                src = srcs.get(f.lower())
+                if not src:
+                    continue
+                checked += 1
+                if sha(os.path.join(root, f)) != sha(src):
+                    bad.append(f)
+        return checked, bad
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def decompile_roundtrip(proj_dir, chm):
     """Returns (checked, mismatched-list). Skipped (checked=0) if hh.exe absent."""
     if not os.path.exists(HH):
@@ -106,11 +127,16 @@ def test_project(hhp, must_have, proj_dir=None):
     entries = read_dir(chm)
     for nm in must_have:
         check("contains %s" % nm, nm in entries)
+    # self-contained round-trip via FastChm's own reader
+    xchecked, xbad = extract_roundtrip(proj_dir, chm)
+    check("extract round-trip byte-identical (%d files)" % xchecked,
+          xchecked > 0 and not xbad, str(xbad))
+    # cross-check against Windows' own decompiler when present
     checked, bad = decompile_roundtrip(proj_dir, chm)
     if checked:
-        check("round-trip byte-identical (%d files)" % checked, not bad, str(bad))
+        check("hh.exe round-trip byte-identical (%d files)" % checked, not bad, str(bad))
     else:
-        print("  skip round-trip (hh.exe not available)")
+        print("  skip hh.exe round-trip (not available)")
 
 
 def main():

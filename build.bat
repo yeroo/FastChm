@@ -7,4 +7,4 @@ if not defined VSPATH echo Visual Studio not found.& exit /b 1
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 :build
 if not exist out mkdir out
-cl /nologo /std:c++17 /O2 /EHsc /W4 /Fo:out\ /Fe:fastchm.exe src\lzx.cpp src\chmwriter.cpp src\sitemap.cpp src\fifti.cpp src\builder.cpp src\main.cpp
+cl /nologo /std:c++17 /O2 /EHsc /W4 /Fo:out\ /Fe:fastchm.exe src\lzx.cpp src\lzxdecode.cpp src\chmwriter.cpp src\chmreader.cpp src\sitemap.cpp src\fifti.cpp src\builder.cpp src\main.cpp
