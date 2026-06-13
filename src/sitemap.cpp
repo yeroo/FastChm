@@ -117,6 +117,37 @@ void SiteMap::collectLocals(std::vector<std::string>& out) const {
     Rec::walk(items, out);
 }
 
+LinkObjects scanLinkObjects(const uint8_t* data, size_t size) {
+    LinkObjects out;
+    const std::string s(reinterpret_cast<const char*>(data), size);
+    bool inObject = false;
+    size_t i = 0;
+    while (i < s.size()) {
+        if (s[i] != '<') {
+            i++;
+            continue;
+        }
+        if (s.compare(i, 4, "<!--") == 0) {
+            const size_t end = s.find("-->", i);
+            i = end == std::string::npos ? s.size() : end + 3;
+            continue;
+        }
+        Tag t = parseTag(s, i);
+        if (t.name == "object") {
+            inObject = true;
+        } else if (t.name == "/object") {
+            inObject = false;
+        } else if (t.name == "param" && inObject) {
+            const std::string name = lowerCopy(attr(t, "name"));
+            const std::string value = attr(t, "value");
+            if (value.empty()) continue;
+            if (name == "keyword") out.keywords.push_back(value);
+            else if (name == "alink name") out.alinks.push_back(value);
+        }
+    }
+    return out;
+}
+
 SiteMap parseSiteMap(const uint8_t* data, size_t size) {
     SiteMap sm;
     const std::string s(reinterpret_cast<const char*>(data), size);

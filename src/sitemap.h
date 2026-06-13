@@ -29,4 +29,13 @@ struct SiteMap {
 
 SiteMap parseSiteMap(const uint8_t* data, size_t size);
 
+// Keyword/ALink references harvested from HTML Help <OBJECT> controls embedded in
+// a topic page (param "Keyword" and "ALink Name", any object type).
+struct LinkObjects {
+    std::vector<std::string> keywords;
+    std::vector<std::string> alinks;
+};
+
+LinkObjects scanLinkObjects(const uint8_t* data, size_t size);
+
 }  // namespace fastchm

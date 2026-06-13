@@ -1,0 +1,25 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=feat.chm
+Contents file=feat.hhc
+Index file=feat.hhk
+Default topic=main.htm
+Title=FastChm Collection Features
+Language=0x409
+Binary Index=Yes
+Full-text search=Yes
+
+[FILES]
+main.htm
+
+[MERGE FILES]
+sub1.chm::/sub1.hhc
+sub2.chm::/sub2.hhc
+
+[SUBSETS]
+Tutorials=0,0,0
+Reference=0,0,0
+
+[INFOTYPES]
+Beginner
+Advanced

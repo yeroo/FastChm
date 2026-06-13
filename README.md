@@ -25,6 +25,11 @@ fastchm <project.hhp> [-o output.chm]
   **context IDs** (`#IVB`, works with `HtmlHelp()`/`hh.exe -mapid`).
 - **Binary TOC** (`#TOCIDX`) and **binary index** (`$WWKeywordLinks` BTree +
   Data/Map/Property, KLinks) when `Binary TOC=Yes` / `Binary Index=Yes`.
+- **KLinks and ALinks from `<object>` controls** embedded in topic pages
+  (`param name="Keyword"` / `"ALink Name"`) — real `$WWKeywordLinks` and
+  `$WWAssociativeLinks` BTrees; object keywords merge into the binary index.
+- **Collections**: `[MERGE FILES]` (recorded in `#IDXHDR`), `[SUBSETS]`
+  (`#SUBSETS`), and `[INFOTYPES]` (`#SYSTEM` info-type count).
 - **Full-text search**: `$FIftiMain` word index (scale/root bit coding,
   prefix-compressed word tree) plus the `$OBJINST` word-breaker blob, when
   `Full-text search=Yes`. Phrase queries work (word positions are indexed).
@@ -50,13 +55,17 @@ hh.exe -decompile test\decompiled test\sample\sample.chm
 ```
 
 The sample project exercises auto-inclusion, window definitions, context IDs,
-binary TOC/index and full-text search.
+binary TOC/index, full-text search and ALink/KLink object controls.
+`test\feat\feat.hhp` additionally covers `[MERGE FILES]`, `[SUBSETS]` and
+`[INFOTYPES]`.
 
 ## Not yet implemented
 
-- `[MERGE FILES]` (merged/collection help), `[SUBSETS]`, information types
-- ALinks from `<object>` tags inside topic pages (`$WWAssociativeLinks` is
-  emitted as an empty placeholder)
+- Actually *building* a merged collection (`[MERGE FILES]` is recorded in the
+  metadata, but FastChm compiles one `.chm` at a time — it does not stitch the
+  referenced files into a master collection)
+- `#SUBSETS`/`#INFOTYPES` are emitted structurally; the HH Workshop info-type
+  authoring semantics (per-topic type membership) are not modelled
 - CHM decompilation (use `hh.exe -decompile`)
 
 ## Format references
