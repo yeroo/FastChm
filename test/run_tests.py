@@ -35,6 +35,15 @@ def check(name, cond, detail=""):
     else:
         failed += 1
         print("  FAIL %s %s" % (name, detail))
+        # surfaces in the GitHub Actions log as an annotation we can read back
+        print("::error::FAIL %s %s" % (name, detail))
+
+
+def read_or_none(path):
+    try:
+        return open(path, "rb").read()
+    except OSError:
+        return None
 
 
 def run_fastchm(args):
@@ -201,10 +210,12 @@ def main():
         subprocess.run([FASTCHM, "--extract",
                         os.path.join(ROOT, "test", "utf8", "utf8.chm"), tmp],
                        capture_output=True)
-        strings = open(os.path.join(tmp, "#STRINGS"), "rb").read()
-        check("title stored as cp1252 (0xE9/0xFC present)",
-              0xE9 in strings and 0xFC in strings, strings.hex())
-        check("title not raw UTF-8 (no 0xC3 lead byte)", 0xC3 not in strings)
+        strings = read_or_none(os.path.join(tmp, "#STRINGS"))
+        check("utf8 #STRINGS extracted", strings is not None)
+        if strings is not None:
+            check("title stored as cp1252 (0xE9/0xFC present)",
+                  0xE9 in strings and 0xFC in strings, strings.hex())
+            check("title not raw UTF-8 (no 0xC3 lead byte)", 0xC3 not in strings)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -215,8 +226,10 @@ def main():
         subprocess.run([FASTCHM, "--extract",
                         os.path.join(ROOT, "test", "sample", "sample.chm"), tmp],
                        capture_output=True)
-        idx = open(os.path.join(tmp, "#IDXHDR"), "rb").read()
-        check("#IDXHDR ImageType=Folder flag set", len(idx) > 0x1C and idx[0x1C] == 1)
+        idx = read_or_none(os.path.join(tmp, "#IDXHDR"))
+        check("#IDXHDR extracted", idx is not None)
+        if idx is not None:
+            check("#IDXHDR ImageType=Folder flag set", len(idx) > 0x1C and idx[0x1C] == 1)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -234,4 +247,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:  # surface a runner-side crash as a readable annotation
+        import traceback
+        print("::error::harness crashed: %r" % e)
+        traceback.print_exc()
+        sys.exit(2)
