@@ -139,6 +139,30 @@ def test_project(hhp, must_have, proj_dir=None):
         print("  skip hh.exe round-trip (not available)")
 
 
+def generate_large_project(dirpath):
+    """Writes a ~200 KB multi-file project so the compressed section spans several
+    64 KB LZX reset intervals (exercises interval reset + frame realignment). Used
+    in place of the (gitignored) hand-generated test/big."""
+    os.makedirs(dirpath, exist_ok=True)
+    files = []
+    for i in range(60):
+        name = "topic%03d.htm" % i
+        para = ("Topic %d covers feature %d in detail. " % (i, i * 7)) * (20 + (i % 30))
+        html = ("<html><head><title>Topic %d Reference</title></head><body>"
+                "<h1>Topic %d</h1><p>%s</p></body></html>" % (i, i, para))
+        open(os.path.join(dirpath, name), "w", encoding="utf-8").write(html)
+        files.append(name)
+    big = "All work and no play. " * 6000  # ~130 KB highly compressible
+    open(os.path.join(dirpath, "big.htm"), "w", encoding="utf-8").write(
+        "<html><head><title>Big</title></head><body>%s</body></html>" % big)
+    files.append("big.htm")
+    hhp = ("[OPTIONS]\nCompiled file=large.chm\nDefault topic=topic000.htm\n"
+           "Title=Large\nLanguage=0x409\nFull-text search=Yes\n\n[FILES]\n"
+           + "\n".join(files) + "\n")
+    open(os.path.join(dirpath, "large.hhp"), "w", encoding="utf-8").write(hhp)
+    return os.path.join(dirpath, "large.hhp")
+
+
 def main():
     if not os.path.exists(FASTCHM):
         print("fastchm.exe not found at %s" % FASTCHM)
@@ -156,8 +180,13 @@ def main():
                  common + ["/#SUBSETS", "/#IDXHDR", "/$WWKeywordLinks/BTree",
                            "/$WWAssociativeLinks/BTree"])
 
-    test_project(os.path.join(ROOT, "test", "big", "big.hhp"),
-                 common + ["/$FIftiMain"])
+    # large generated project: multiple LZX reset intervals + FTS (replaces the
+    # gitignored test/big so CI has the same coverage on a fresh checkout)
+    biggen = tempfile.mkdtemp(prefix="fastchm_big_")
+    try:
+        test_project(generate_large_project(biggen), common + ["/$FIftiMain"], biggen)
+    finally:
+        shutil.rmtree(biggen, ignore_errors=True)
 
     # UTF-8 source title must be re-encoded into the project codepage (cp1252 here),
     # not stored as raw UTF-8 bytes.
