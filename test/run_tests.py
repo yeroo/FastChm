@@ -114,7 +114,11 @@ def decompile_roundtrip(proj_dir, chm):
 
 
 def test_project(hhp, must_have, proj_dir=None):
-    print("[project] %s" % os.path.relpath(hhp, ROOT))
+    try:
+        label = os.path.relpath(hhp, ROOT)
+    except ValueError:  # hhp on a different drive than the repo (e.g. C: temp vs D: checkout)
+        label = hhp
+    print("[project] %s" % label)
     proj_dir = proj_dir or os.path.dirname(hhp)
     rc, out = run_fastchm([hhp])
     check("compiles", rc == 0, out.strip())
