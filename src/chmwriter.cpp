@@ -1,7 +1,7 @@
 #include "chmwriter.h"
 
 #include <algorithm>
-#include <cstdio>
+#include <fstream>
 
 #include "bytebuf.h"
 
@@ -198,20 +198,25 @@ bool writeContainer(const std::string& path, uint32_t langId,
     out.i32(-1);
     out.i32(-1);
 
-    FILE* f = nullptr;
-    if (fopen_s(&f, path.c_str(), "wb") != 0 || !f) {
+    std::ofstream f(path, std::ios::binary);
+    if (!f) {
         err = "cannot open output file: " + path;
         return false;
     }
-    bool ok = fwrite(out.v.data(), 1, out.v.size(), f) == out.v.size() &&
-              (chunks.empty() || fwrite(chunks.data(), 1, chunks.size(), f) == chunks.size()) &&
-              (section0.empty() ||
-               fwrite(section0.data(), 1, section0.size(), f) == section0.size()) &&
-              (compressed.empty() ||
-               fwrite(compressed.data(), 1, compressed.size(), f) == compressed.size());
-    if (fclose(f) != 0) ok = false;
-    if (!ok) err = "error writing " + path;
-    return ok;
+    auto put = [&](const std::vector<uint8_t>& b) {
+        if (!b.empty()) f.write(reinterpret_cast<const char*>(b.data()),
+                                static_cast<std::streamsize>(b.size()));
+    };
+    put(out.v);
+    put(chunks);
+    put(section0);
+    put(compressed);
+    f.close();
+    if (!f) {
+        err = "error writing " + path;
+        return false;
+    }
+    return true;
 }
 
 }  // namespace fastchm

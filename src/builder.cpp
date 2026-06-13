@@ -17,6 +17,7 @@
 #include "lzx.h"
 #include "objinst_data.h"
 #include "sitemap.h"
+#include "version.h"
 
 namespace fastchm {
 namespace {
@@ -1196,7 +1197,7 @@ std::vector<uint8_t> Compiler::buildSystem(const std::string& defaultWindow,
     b.u16(10);
     b.u16(4);
     b.u32(static_cast<uint32_t>(time(nullptr)));
-    sysEntryStr(b, 9, "FastChm 0.4");
+    sysEntryStr(b, 9, "FastChm " FASTCHM_VERSION);
     b.u16(4);
     b.u16(36);
     b.u32(lcid_);

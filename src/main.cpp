@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "builder.h"
+#include "version.h"
 
 static void printStats(const char* path, const fastchm::CompileStats& s) {
     printf("%s: %zu files, %llu -> %llu bytes (%.1f%%), output %llu bytes\n", path,
@@ -23,6 +24,9 @@ int main(int argc, char** argv) {
             out = argv[++i];
         } else if (arg == "-c" || arg == "--collection") {
             collection = true;
+        } else if (arg == "-v" || arg == "--version") {
+            printf("FastChm %s\n", FASTCHM_VERSION);
+            return 0;
         } else if (arg == "-h" || arg == "--help" || arg == "/?") {
             hhp.clear();
             break;
@@ -34,9 +38,11 @@ int main(int argc, char** argv) {
         }
     }
     if (hhp.empty()) {
-        printf("FastChm 0.4 — zero-dependency CHM compiler\n"
+        printf("FastChm %s — zero-dependency CHM compiler\n"
                "usage: fastchm <project.hhp> [-o output.chm]\n"
-               "       fastchm --collection <master.hhp>   build master + [MERGE FILES] children\n");
+               "       fastchm --collection <master.hhp>   build master + [MERGE FILES] children\n"
+               "       fastchm --version\n",
+               FASTCHM_VERSION);
         return 2;
     }
 

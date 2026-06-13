@@ -1,8 +1,12 @@
 # build output
 out/
+build-cmake/
+build/
 fastchm.exe
 *.obj
 *.pdb
+__pycache__/
+*.pyc
 
 # compiled help files and test artifacts
 *.chm
