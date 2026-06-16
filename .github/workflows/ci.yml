@@ -11,7 +11,7 @@ jobs:
   build-test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Use the runner's default Visual Studio generator (windows-latest moved to
       # VS2026); -A x64 still applies since the default generator is a VS generator.
