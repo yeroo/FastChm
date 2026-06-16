@@ -17,7 +17,8 @@ add_executable(fastchm
   src/fifti.cpp
   src/textenc.cpp
   src/builder.cpp
-  src/main.cpp)
+  src/main.cpp
+  $<$<BOOL:${WIN32}>:src/fastchm.rc>)
 
 if(MSVC)
   target_compile_options(fastchm PRIVATE /W4 /EHsc /permissive-)

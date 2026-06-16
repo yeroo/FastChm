@@ -23,7 +23,8 @@ malware:
   through the CI / release workflows.
 - The tool reads and writes files and produces a compressed output, which is the
   kind of behavior some heuristics over-weight.
-- We are pursuing Authenticode code signing to resolve this for good.
+- We are pursuing Authenticode code signing (via the SignPath Foundation
+  free OSS program) to resolve this for good — see [SIGNING.md](SIGNING.md).
 
 If you encounter it, you can build from source or verify the binary against the
 CI build. **This is not a security vulnerability — please do not report it as
