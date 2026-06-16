@@ -1,5 +1,10 @@
 # FastChm
 
+[![CI](https://github.com/yeroo/FastChm/actions/workflows/ci.yml/badge.svg)](https://github.com/yeroo/FastChm/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/yeroo/FastChm)](https://github.com/yeroo/FastChm/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/yeroo/FastChm/badge)](https://scorecard.dev/viewer/?uri=github.com/yeroo/FastChm)
+
 A fast, zero-dependency CHM (Microsoft HTML Help) **compiler** for Windows — a modern
 C++ replacement for `hhc.exe` (HTML Help Workshop), in the spirit of Free Pascal's
 `chmcmd`, but with no runtime or build dependencies beyond MSVC and the C++17
